@@ -1,0 +1,87 @@
+# ============================================================
+# QtQQ 项目 Git 忽略规则
+# ============================================================
+
+# ===== 构建产物 =====
+build/
+out/
+Debug/
+Release/
+x64/
+x86/
+debug/
+release/
+
+# ===== Qt 生成文件 =====
+*.user
+*.user.*
+moc_*.cpp
+moc_*.cpp.d
+qrc_*.cpp
+ui_*.h
+mocs_compilation*.cpp
+mocs_compilation*.cpp.obj
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.manifest
+*.rc
+
+# ===== CMake 临时 =====
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+!qt.cmake
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+CMakeUserPresets.json
+
+# ===== Visual Studio =====
+.vs/
+*.suo
+*.opensdf
+*.sdf
+*.aps
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+*.VC.opendb
+*.ipch
+*.ipdb
+slnx.sqlite
+DocumentLayout.json
+DocumentLayout.backup.json
+VSWorkspaceState.json
+ProjectSettings.json
+CMakeWorkspaceSettings.json
+CMake Overview
+
+# ===== 可执行文件 =====
+*.exe
+*.dll
+
+# ===== 配置文件（含数据库密码等敏感信息，不提交） =====
+config/config.ini
+QtQQ/config/config.ini
+QtQQ_Server/config/config.ini
+
+# ===== 日志 =====
+*.log
+
+# ===== 临时文件 =====
+*.tmp
+*.bak
+*~
+*.swp
+*.orig
+
+# ===== 测试程序构建产物 =====
+QtQQ_Server/test_packet/build/

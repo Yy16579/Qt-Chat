@@ -1,0 +1,596 @@
+/* =========================== 全局字体 ============================ */
+/* 全局字体统一设置为微软雅黑 */
+* {
+	font-family: Microsoft YaHei;
+}
+
+/* =========================== 聊天窗口主容器 ============================ */
+/* 聊天窗口核心容器 */
+QWidget#TalkWindow {
+	background-color: #ffffff;
+	border: 1px solid #eeeeee;
+}
+
+/* 聊天窗口边框容器 */
+QWidget#frameWidget {
+	background-color: #ffffff;
+	border-top: 1px solid #eeeeee;
+	border-bottom: 1px solid #eeeeee;
+}
+
+/* =========================== 系统按钮 (最小化/关闭) ============================ */
+/* 最小化按钮 - 默认态 */
+QPushButton#sysmin {
+	border-image: url(:/Resources/MainWindow/sysbtn_min_normal.png);
+}
+
+/* 最小化按钮 - 悬浮态 */
+QPushButton#sysmin:hover {
+	border-image: url(:/Resources/MainWindow/sysbtn_min_hover.png);
+}
+
+/* 最小化按钮 - 按下态 */
+QPushButton#sysmin:pressed {
+	border-image: url(:/Resources/MainWindow/sysbtn_min_down.png);
+}
+
+/* 关闭按钮 - 默认态 */
+QPushButton#sysclose {
+	border-image: url(:/Resources/MainWindow/sysbtn_close_normal.png);
+}
+
+/* 关闭按钮 - 悬浮态 */
+QPushButton#sysclose:hover {
+	border-image: url(:/Resources/MainWindow/sysbtn_close_hover.png);
+}
+
+/* 关闭按钮 - 按下态 */
+QPushButton#sysclose:pressed {
+	border-image: url(:/Resources/MainWindow/sysbtn_close_down.png);
+}
+
+/* =========================== 标题信息标签 ============================ */
+/* 聊天对象名称标签 */
+QLabel#nameLabel {
+	font-size: 16px;
+	color: #333333;
+}
+
+/* 聊天对象签名标签 */
+QLabel#signLabel {
+	font-size: 12px;
+	color: #333333;
+}
+
+/* 皮肤背景标签 */
+QLabel#skinLabel {
+	border-image: url(:/Resources/MainWindow/skin.png);
+	border-width: 2px;
+	border-bottom-right-radius: 4px;
+}
+
+/* =========================== 列表/分栏控件 ============================ */
+/* 聊天列表容器 */
+QWidget#listWidget {
+	border-top-left-radius: 4px;
+	border-top-right-radius: 0px;
+	border-bottom-left-radius: 4px;
+}
+
+/* 右侧分栏按钮 - 默认态 */
+QPushButton#rightSpliterBtn {
+	border-image: url(:/Resources/MainWindow/aio_splitbutton_right_normal.png);
+	border-width: 0px;
+}
+
+/* 右侧分栏按钮 - 悬浮态 */
+QPushButton#rightSpliterBtn:hover {
+	border-image: url(:/Resources/MainWindow/aio_splitbutton_right_hover.png);
+	border-width: 0px;
+}
+
+/* 右侧分栏按钮 - 按下态 */
+QPushButton#rightSpliterBtn:pressed {
+	border-image: url(:/Resources/MainWindow/aio_splitbutton_right_down.png);
+	border-width: 0px;
+}
+
+/* =========================== 关闭/发送按钮 ============================ */
+/* 关闭按钮 */
+QToolButton#closeBtn {
+	background-color: rgb(141, 210, 235);
+	color: #ffffff;
+	font-size: 12px;
+	border-radius: 4px;
+	padding-right: 0px;
+}
+
+/* 关闭按钮 - 悬浮/按下态 */
+QToolButton#closeBtn:hover {
+	background-color: rgba(141, 210, 235, 150);
+}
+
+QToolButton#closeBtn:pressed {
+	background-color: rgba(141, 210, 235, 150);
+}
+
+/* 发送按钮 */
+QToolButton#sendBtn {
+	background-color: rgb(141, 210, 235);
+	color: #ffffff;
+	font-size: 12px;
+	border-radius: 4px;
+	padding-right: 20px;
+}
+
+/* 发送按钮 - 悬浮/按下态 */
+QToolButton#sendBtn:hover {
+	background-color: rgba(141, 210, 235, 150);
+}
+
+QToolButton#sendBtn:pressed {
+	background-color: rgba(141, 210, 235, 150);
+}
+
+/* 发送按钮下拉菜单按钮 */
+QToolButton#sendBtn::menu-button {
+	margin-top: 5px;
+	border-top-right-radius: 4px;
+	border-bottom-right-radius: 4px;
+	border-left: 1px solid rgba(255, 255, 255, 100);
+	background-color: transparent;
+	width: 24px;
+	height: 14px;
+}
+
+/* 发送按钮下拉菜单箭头 */
+QToolButton#sendBtn::menu-arrow {
+	image: url(:/Resources/MainWindow/aio_setting_white_normal.png);
+}
+
+/* =========================== 工具栏按钮组 ============================ */
+/* 表情按钮 - 默认态 */
+QPushButton#faceBtn {
+	border-image: url(:/Resources/MainWindow/aio_quickbar_face.png);
+}
+
+/* 表情按钮 - 悬浮态 */
+QPushButton#faceBtn:hover {
+	background-image: url(:/Resources/MainWindow/aio_quickbar_face_hover.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 表情按钮 - 按下/选中态 */
+QPushButton#faceBtn:pressed, QPushButton#faceBtn:checked {
+	background-image: url(:/Resources/MainWindow/aio_quickbar_face_hover.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 文件打开按钮 - 默认态 */
+QPushButton#fileopenBtn {
+	border-image: url(:/Resources/MainWindow/fileopen.png);
+}
+
+/* 文件打开按钮 - 悬浮态 */
+QPushButton#fileopenBtn:hover {
+	background-image: url(:/Resources/MainWindow/fileopen_hover.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 文件打开按钮 - 按下/选中态 */
+QPushButton#fileopenBtn:pressed, QPushButton#fileopenBtn:checked {
+	background-image: url(:/Resources/MainWindow/fileopen_press.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 添加按钮 - 默认态 */
+QPushButton#addtoolbtn {
+	background-color: transparent;
+	background-image: url(:/Resources/MainWindow/aio_toobar_add.png);
+	background-position: center;
+}
+
+/* 添加按钮 - 悬浮态 */
+QPushButton#addtoolbtn:hover {
+	background-image: url(:/Resources/MainWindow/aio_toobar_add.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 添加按钮 - 按下态 */
+QPushButton#addtoolbtn:pressed {
+	background-image: url(:/Resources/MainWindow/aio_toobar_add.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 添加联系人按钮 - 默认态 */
+QPushButton#addhumanBtn {
+	background-color: transparent;
+	background-image: url(:/Resources/MainWindow/aio_toobar_addhuman.png);
+	background-position: center;
+}
+
+/* 添加联系人按钮 - 悬浮态 */
+QPushButton#addhumanBtn:hover {
+	background-image: url(:/Resources/MainWindow/aio_toobar_addhuman.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 添加联系人按钮 - 按下态 */
+QPushButton#addhumanBtn:pressed {
+	background-image: url(:/Resources/MainWindow/aio_toobar_addhuman.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 应用按钮 - 默认态 */
+QPushButton#appBtn {
+	background-color: transparent;
+	background-image: url(:/Resources/MainWindow/aio_toobar_app.png);
+	background-position: center;
+}
+
+/* 应用按钮 - 悬浮态 */
+QPushButton#appBtn:hover {
+	background-image: url(:/Resources/MainWindow/aio_toobar_app.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 应用按钮 - 按下态 */
+QPushButton#appBtn:pressed {
+	background-image: url(:/Resources/MainWindow/aio_toobar_app.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 视频/汇报按钮 - 默认态 */
+QPushButton#videoBtn {
+	background-color: transparent;
+	background-image: url(:/Resources/MainWindow/aio_toobar_report.png);
+	background-position: center;
+}
+
+/* 视频/汇报按钮 - 悬浮态 */
+QPushButton#videoBtn:hover {
+	background-image: url(:/Resources/MainWindow/aio_toobar_report.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 视频/汇报按钮 - 按下态 */
+QPushButton#videoBtn:pressed {
+	background-image: url(:/Resources/MainWindow/aio_toobar_report.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 工具设置按钮 - 默认态 */
+QPushButton#toolsetBtn {
+	background-color: transparent;
+	background-image: url(:/Resources/MainWindow/aio_toobar_tool.png);
+	background-position: center;
+}
+
+/* 工具设置按钮 - 悬浮态 */
+QPushButton#toolsetBtn:hover {
+	background-image: url(:/Resources/MainWindow/aio_toobar_tool.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 工具设置按钮 - 按下态 */
+QPushButton#toolsetBtn:pressed {
+	background-image: url(:/Resources/MainWindow/aio_toobar_tool.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* =========================== 右侧分栏区域 ============================ */
+/* 右侧堆栈窗口容器 */
+QWidget#rightStackedWidget {
+	background-color: #ffffff;
+	border-top-right-radius: 4px;
+	border-bottom-right-radius: 4px;
+}
+
+/* =========================== 聊天列表视图 ============================ */
+/* 列表视图整体样式 */
+QListView {
+	background-color: rgb(48, 165, 106);
+	padding: 4px;
+}
+
+/* 列表项 - 默认态 */
+QListView::item {
+	border-radius: 4px;
+	background-color: transparent;
+	height: 44px;
+}
+
+/* 列表项 - 选中态 */
+QListView::item:selected {
+	border-radius: 4px;
+	background-color: rgba(141, 210, 235, 150);
+}
+
+/* 列表项 - 选中非激活态 */
+QListView::item:selected:!active {
+	border-radius: 4px;
+	background-color: rgba(141, 210, 235, 150);
+}
+
+/* 列表项 - 选中激活态 */
+QListView::item:selected:active {
+	border-radius: 4px;
+	background-color: rgba(141, 210, 235, 150);
+}
+
+/* 列表项 - 悬浮态 */
+QListView::item:hover {
+	background-color: rgba(141, 210, 235, 100);
+}
+
+/* =========================== 聊天标签项关闭按钮 ============================ */
+/* 聊天项关闭按钮 - 默认态 */
+QPushButton#tclosebtn {
+	border-image: url(:/Resources/MainWindow/close.png);
+	border-width: 0px;
+}
+
+/* 聊天项关闭按钮 - 悬浮态 */
+QPushButton#tclosebtn:hover {
+	border-image: url(:/Resources/MainWindow/close-hover.png);
+	border-width: 0px;
+}
+
+/* 聊天项关闭按钮 - 按下态 */
+QPushButton#tclosebtn:pressed {
+	border-image: url(:/Resources/MainWindow/close-hover.png);
+	border-width: 0px;
+}
+
+/* =========================== 消息标签 ============================ */
+/* 消息内容标签 */
+QLabel#msgLabel {
+	color: #333333;
+	font-size: 12px;
+}
+
+/* =========================== 发送菜单 ============================ */
+/* 发送下拉菜单容器 */
+QMenu#senMenu {
+	border-image: url(:/Resources/MainWindow/menu_bkg.gft.png);
+	border-width: 2px;
+}
+
+/* 发送菜单项 */
+QMenu#senMenu::item {
+	padding: 4px 12px 4px 26px;
+	background-color: #ffffff;
+	height: 24px;
+}
+
+/* 发送菜单项 - 悬浮态 */
+QMenu#senMenu::item:hover {
+	background-color: rgb(51, 127, 209);
+}
+
+/* 发送菜单项 - 选中态 */
+QMenu#senMenu::item:selected {
+	background-color: rgb(51, 127, 209);
+}
+
+/* 发送菜单图标 */
+QMenu#senMenu::icon {
+	width: 24px;
+	height: 24px;
+}
+
+/* 发送菜单单选指示器 - 选中态 */
+QMenu#senMenu::indicator:exclusive:checked {
+	image: url(:/Resources/MainWindow/menu_check.png);
+}
+
+/* 发送菜单单选指示器 - 选中且被选择态 */
+QMenu#senMenu::indicator:exclusive:checked:selected {
+	image: url(:/Resources/MainWindow/menu_check.png);
+}
+
+/* 发送菜单分隔线 */
+QMenu#senMenu::separator {
+	height: 1px;
+	background: #eeeeee;
+}
+
+/* 发送菜单指示器 */
+QMenu#senMenu::indicator {
+	padding: 0px 0px 0px 6px;
+	width: 16px;
+	height: 16px;
+}
+
+/* =========================== 下拉框 ============================ */
+/* 下拉框整体样式 */
+QComboBox {
+	border: 1px solid #cccccc;
+	border-radius: 2px;
+	background-color: #ffffff;
+}
+
+/* 下拉框 - 悬浮/展开态 */
+QComboBox:hover, QComboBox:open {
+	border: 1px solid rgb(55, 143, 207);
+	border-radius: 2px;
+	background-color: #ffffff;
+}
+
+/* 下拉框 - 可编辑态 */
+QComboBox:editable {
+	background: #ffffff;
+}
+
+/* 下拉框下拉按钮区域 */
+QComboBox::drop-down {
+	border-left-width: 0px;
+	width: 24px;
+}
+
+/* 下拉框下拉箭头 */
+QComboBox::down-arrow {
+	image: url(:/Resources/MainWindow/list_down.png);
+}
+
+/* 下拉框弹出列表视图 */
+QComboBox QListView {
+	border: 1px solid rgb(55, 143, 207);
+	selection-background-color: rgb(55, 143, 207);
+	background-color: #ffffff;
+}
+
+/* 下拉框弹出视图项字体 */
+QComboBox QAbstractItemView {
+	color: #333333;
+	font-size: 12px;
+}
+
+/* =========================== 水平滚动条 ============================ */
+/* 水平滚动条整体 */
+QScrollBar:horizontal {
+	background: #ffffff;
+	height: 6px;
+}
+
+/* 水平滚动条滑块 */
+QScrollBar::handle:horizontal {
+	background: #cccccc;
+	border-radius: 3px;
+	height: 6px;
+}
+
+/* 水平滚动条左箭头区域 */
+QScrollBar::sub-line:horizontal {
+	background: transparent;
+}
+
+/* 水平滚动条右箭头区域 */
+QScrollBar::add-line:horizontal {
+	background: transparent;
+}
+
+/* =========================== 垂直滚动条 ============================ */
+/* 垂直滚动条整体 */
+QScrollBar:vertical {
+	background: #ffffff;
+	width: 6px;
+}
+
+/* 垂直滚动条滑块 */
+QScrollBar::handle:vertical {
+	background: #cccccc;
+	border-radius: 3px;
+	width: 6px;
+}
+
+/* 垂直滚动条上箭头区域 */
+QScrollBar::sub-line:vertical {
+	background: transparent;
+}
+
+/* 垂直滚动条下箭头区域 */
+QScrollBar::add-line:vertical {
+	background: transparent;
+}
+
+/* =========================== 标题栏容器 ============================ */
+/* 标题栏窗口容器 */
+QWidget#titleWidget {
+	border-top: 0px;
+}
+
+/* =========================== 消息编辑框修复 ============================ */
+/* 修复输入框文字看不见：文本编辑框统一背景和文字色 */
+QTextEdit, QMsgTextEdit {
+	background-color: #ffffff;
+	color: #333333;
+	font-size: 12px;
+	border: none;
+}
+
+/* =========================== treeWidget 颜色修复 ============================ */
+/* 树形视图背景白色，与主窗体保持一致 */
+QTreeWidget {
+	background-color: #ffffff;
+	border: none;
+}
+
+/* 树形视图项 - 透明背景（由 treeWidget 白色透出） */
+QTreeWidget::item {
+	border-radius: 4px;
+	background-color: transparent;
+}
+
+/* 树形视图项 - 选中态 */
+QTreeWidget::item:selected {
+	border-radius: 4px;
+	background-color: rgba(141, 210, 235, 150);
+}
+
+/* 树形视图项 - 悬浮态 */
+QTreeWidget::item:hover {
+	background-color: rgba(141, 210, 235, 100);
+}
+
+/* =========================== 全局字体颜色 ============================ */
+/* 全局字体颜色固定为黑色（与 CCMainWindow.css 保持一致） */
+QWidget {
+	color: #000000;
+}
+
+/* =========================== 消息提示框 ============================ */
+/* 网络连接失败等弹窗：黑底白字，与系统深色主题协调 */
+QMessageBox {
+	background-color: #000000;
+}
+
+QMessageBox QLabel {
+	color: #ffffff;
+}
+
+QMessageBox QPushButton {
+	color: #ffffff;
+	background-color: #2a2a2a;
+	border: 1px solid #5a5a5a;
+	border-radius: 3px;
+	padding: 4px 16px;
+	min-width: 60px;
+}
+
+QMessageBox QPushButton:hover {
+	background-color: #3a3a3a;
+	border: 1px solid #2a9d8f;
+}
+
+QMessageBox QPushButton:pressed {
+	background-color: #1a1a1a;
+}

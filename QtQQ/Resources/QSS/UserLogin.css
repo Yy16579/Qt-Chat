@@ -1,0 +1,115 @@
+/* 登录窗口主容器 */
+QWidget#UserLogin {
+	background-color: #ffffff;
+	border: 1px solid #cccccc;
+	border-radius: 4px;
+}
+
+/* 标题栏文字 */
+QLabel#TitleContent {
+	font-size: 12px;
+	color: #ffffff;
+}
+
+/* 登录按钮 */
+QPushButton#loginBtn {
+	font-size: 14px;
+	background: rgb(7, 189, 253);
+	color: #ffffff;
+	border: none;
+	border-radius: 4px;
+}
+
+/* 登录按钮 - 悬浮/按下态 */
+QPushButton#loginBtn:hover, QPushButton#loginBtn:pressed {
+	background: rgb(33, 200, 253);
+}
+
+/* 忘记密码 / 注册账号按钮 */
+QPushButton#forgetWordbtn, QPushButton#registBtn {
+	background: transparent;
+	font-size: 12px;
+	color: rgb(0, 148, 206);
+	border: none;
+}
+
+/* 忘记密码 / 注册账号按钮 - 悬浮态 */
+QPushButton#forgetWordbtn:hover, QPushButton#registBtn:hover {
+	color: rgb(0, 164, 222);
+}
+
+/* 记住密码复选框 */
+QCheckBox {
+	spacing: 5px;
+	font-size: 12px;
+	color: #666666;
+	background-color: transparent;
+}
+
+/* 复选框指示器 - 未选中态 */
+QCheckBox::indicator:enabled, QCheckBox::indicator:enabled:unchecked {
+	width: 15px;
+	height: 15px;
+	border-image: url(:/Resources/MainWindow/checkbox_normal.png);
+}
+
+/* 复选框指示器 - 未选中悬浮态 */
+QCheckBox::indicator:enabled:unchecked:hover {
+	image: url(:/Resources/MainWindow/checkbox_hightlight.png);
+}
+
+/* 复选框指示器 - 选中态 */
+QCheckBox::indicator:enabled:checked {
+	border-image: url(:/Resources/MainWindow/checkbox_tick_normal.png);
+}
+
+/* 复选框指示器 - 选中悬浮态 */
+QCheckBox::indicator:enabled:checked:hover {
+	border-image: url(:/Resources/MainWindow/checkbox_tick_highlight.png);
+}
+
+/* 账号 / 密码输入框 */
+QLineEdit#editUserAccount, QLineEdit#editPassword {
+	background: #ffffff;
+	border: 1px solid #dddddd;
+	border-radius: 2px;
+	font-size: 14px;
+	color: #666666;
+}
+
+/* 账号 / 密码输入框 - 悬浮态 */
+QLineEdit#editUserAccount:hover, QLineEdit#editPassword:hover {
+	background: #ffffff;
+	border: 1px solid rgb(0, 161, 219);
+	border-radius: 2px;
+	font-size: 14px;
+	color: #666666;
+}
+
+/* =========================== 消息提示框 ============================ */
+/* 统一黑底白字风格，与系统深色主题协调 */
+QMessageBox {
+	background-color: #000000;
+}
+
+QMessageBox QLabel {
+	color: #ffffff;
+}
+
+QMessageBox QPushButton {
+	color: #ffffff;
+	background-color: #2a2a2a;
+	border: 1px solid #5a5a5a;
+	border-radius: 3px;
+	padding: 4px 16px;
+	min-width: 60px;
+}
+
+QMessageBox QPushButton:hover {
+	background-color: #3a3a3a;
+	border: 1px solid #2a9d8f;
+}
+
+QMessageBox QPushButton:pressed {
+	background-color: #1a1a1a;
+}

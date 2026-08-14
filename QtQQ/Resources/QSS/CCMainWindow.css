@@ -1,0 +1,389 @@
+/* =========================== 全局基础样式 ============================ */
+/* 全局字体统一设置为微软雅黑 */
+* {
+	font-family: Microsoft YaHei;
+}
+
+/* =========================== 主窗口容器样式 ============================ */
+/* 主窗口核心容器样式 */
+QWidget#CCMainWindowClass {
+	background-color: #ffffff;
+	border: 1px solid #cccccc;
+	border-radius: 4px;
+}
+
+/* =========================== 占位按钮样式 (placehold1/placehold2) ============================ */
+/* 占位按钮1 - 奖牌墙相关 */
+QPushButton#placehold1 {
+	background-image: url(:/Resources/MainWindow/medalwall_ani.png);
+	background-repeat: no-repeat;
+	background-color: transparent;
+}
+
+/* 占位按钮1 - 悬浮态 */
+QPushButton#placehold1:hover {
+	background-image: url(:/Resources/MainWindow/btn_medalwall_dark.png);
+}
+
+/* 占位按钮1 - 按下态 */
+QPushButton#placehold1:pressed {
+	background-image: url(:/Resources/MainWindow/btn_medalwall_dark.png);
+}
+
+/* 占位按钮2 - 账户保护/亮度动画相关 */
+QPushButton#placehold2 {
+	background-image: url(:/Resources/MainWindow/AccProt_disable.png);
+	background-repeat: no-repeat;
+	background-position: 50% 0;
+	background-color: transparent;
+}
+
+/* 占位按钮2 - 悬浮态 */
+QPushButton#placehold2:hover {
+	background-image: url(:/Resources/MainWindow/BriAni_3.png);
+	background-color: rgba(255, 255, 255, 20);
+}
+
+/* 占位按钮2 - 按下态 */
+QPushButton#placehold2:pressed {
+	background-image: url(:/Resources/MainWindow/BriAni_3.png);
+	background-color: rgba(255, 255, 255, 50);
+}
+
+/* =========================== 系统按钮 (最小化/关闭) ============================ */
+/* 最小化按钮 - 默认态 */
+QPushButton#sysmin {
+	border-image: url(:/Resources/MainWindow/btn_mini_normal.gft.png);
+}
+
+/* 最小化按钮 - 悬浮态 */
+QPushButton#sysmin:hover {
+	border-image: url(:/Resources/MainWindow/btn_mini_highlight.gft.png);
+}
+
+/* 最小化按钮 - 按下态 */
+QPushButton#sysmin:pressed {
+	border-image: url(:/Resources/MainWindow/btn_mini_down.gft.png);
+}
+
+/* 关闭按钮 - 默认态 */
+QPushButton#sysclose {
+	border-image: url(:/Resources/MainWindow/btn_close_normal.gft.png);
+}
+
+/* 关闭按钮 - 悬浮态 */
+QPushButton#sysclose:hover {
+	border-image: url(:/Resources/MainWindow/btn_close_highlight.gft.png);
+}
+
+/* 关闭按钮 - 按下态 */
+QPushButton#sysclose:pressed {
+	border-image: url(:/Resources/MainWindow/btn_close_down.gft.png);
+}
+
+/* =========================== 标题栏图标 ============================ */
+/* 标题栏 QQ 经典 logo */
+QLabel#titleIcon {
+	background-image: url(:/Resources/MainWindow/qqlogoclassic.png);
+}
+
+/* =========================== 通用带边框按钮 (属性匹配) ============================ */
+/* 匹配 hasborder=true 属性的按钮 - 默认态 */
+QPushButton[hasborder = true] {
+	background-color: transparent;
+}
+
+/* 带边框按钮 - 悬浮态 */
+QPushButton[hasborder = true]:hover {
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 带边框按钮 - 按下态 */
+QPushButton[hasborder = true]:pressed {
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* =========================== 滚动条样式 ============================ */
+/* 滚动条整体样式 */
+QScrollBar {
+	background: #ffffff;
+	width: 6px;
+}
+
+/* 滚动条滑块 */
+QScrollBar::handle {
+	background: #cccccc;
+	border-radius: 3px;
+	width: 6px;
+}
+
+/* 滚动条上箭头区域 */
+QScrollBar::sub-line {
+	background: transparent;
+}
+
+/* 滚动条下箭头区域 */
+QScrollBar::add-line {
+	background: transparent;
+}
+
+/* =========================== 个性标签输入框 ============================ */
+/* 个性标签输入框 - 默认态 */
+QLineEdit#lineEdit {
+	background-color: transparent;
+	text-align: center;
+}
+
+/* 个性标签输入框 - 悬浮态 */
+QLineEdit#lineEdit:hover {
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+	padding-left: -2px;
+}
+
+/* 个性标签输入框 - 聚焦态 */
+QLineEdit#lineEdit:focus {
+	border-image: url(:/Resources/MainWindow/edit.png);
+	border-width: 2px;
+	padding-left: -2px;
+}
+
+/* =========================== 搜索组件样式 ============================ */
+/* 搜索容器背景 */
+QWidget#searchWidget {
+	background-color: rgba(22, 154, 218, 50);
+}
+
+/* 搜索输入框 */
+QLineEdit#searchLineEdit {
+	background-color: transparent;
+}
+
+/* 搜索按钮 */
+QPushButton#searchBtn {
+	border-image: url(:/Resources/MainWindow/search/search_icon.png);
+}
+
+/* =========================== 底部功能按钮组 (bottomBtn_1 ~ bottomBtn_7) ============================ */
+/* 底部按钮1 - 菜单按钮 - 默认态 */
+QPushButton#bottomBtn_1 {
+	border-image: url(:/Resources/MainWindow/bottom/menu_btn_normal.png);
+}
+
+/* 底部按钮1 - 悬浮态 */
+QPushButton#bottomBtn_1:hover {
+	background-image: url(:/Resources/MainWindow/bottom/menu_btn_highlight.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮1 - 按下态 */
+QPushButton#bottomBtn_1:pressed {
+	background-image: url(:/Resources/MainWindow/bottom/menu_btn2_down.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮2 - 工具按钮 - 默认态 */
+QPushButton#bottomBtn_2 {
+	border-image: url(:/Resources/MainWindow/bottom/tools.png);
+}
+
+/* 底部按钮2 - 悬浮态 */
+QPushButton#bottomBtn_2:hover {
+	background-image: url(:/Resources/MainWindow/bottom/tools_hover.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮2 - 按下态 */
+QPushButton#bottomBtn_2:pressed {
+	background-image: url(:/Resources/MainWindow/bottom/tools_down.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮3 - 消息按钮 - 默认态 */
+QPushButton#bottomBtn_3 {
+	border-image: url(:/Resources/MainWindow/bottom/message.png);
+}
+
+/* 底部按钮3 - 悬浮态 */
+QPushButton#bottomBtn_3:hover {
+	background-image: url(:/Resources/MainWindow/bottom/message_highlight.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮3 - 按下态 */
+QPushButton#bottomBtn_3:pressed {
+	background-image: url(:/Resources/MainWindow/bottom/message_down.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮4 - 我的收藏按钮 - 默认态 */
+QPushButton#bottomBtn_4 {
+	border-image: url(:/Resources/MainWindow/bottom/mycollection_mainpanel.png);
+}
+
+/* 底部按钮4 - 悬浮态 */
+QPushButton#bottomBtn_4:hover {
+	background-image: url(:/Resources/MainWindow/bottom/myCollection_mainpanel_hover.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮4 - 按下态 */
+QPushButton#bottomBtn_4:pressed {
+	background-image: url(:/Resources/MainWindow/bottom/myCollection_mainpanel_down.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮5 - 文件管理器按钮 - 默认态 */
+QPushButton#bottomBtn_5 {
+	border-image: url(:/Resources/MainWindow/bottom/filemanager.png);
+}
+
+/* 底部按钮5 - 悬浮态 */
+QPushButton#bottomBtn_5:hover {
+	background-image: url(:/Resources/MainWindow/bottom/filemanager_hover.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮5 - 按下态 */
+QPushButton#bottomBtn_5:pressed {
+	background-image: url(:/Resources/MainWindow/bottom/filemanager_down.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮6 - 查找按钮 - 默认态 */
+QPushButton#bottomBtn_6 {
+	border-image: url(:/Resources/MainWindow/bottom/find.png);
+}
+
+/* 底部按钮6 - 悬浮态 */
+QPushButton#bottomBtn_6:hover {
+	background-image: url(:/Resources/MainWindow/bottom/find_hover.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮6 - 按下态 */
+QPushButton#bottomBtn_6:pressed {
+	background-image: url(:/Resources/MainWindow/bottom/find_down.png);
+	background-position: center;
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮7 - 通用按钮 - 默认态 */
+QPushButton#bottomBtn_7 {
+	background-color: transparent;
+}
+
+/* 底部按钮7 - 悬浮态 */
+QPushButton#bottomBtn_7:hover {
+	border-image: url(:/Resources/MainWindow/2014_btn_hover.gft.png);
+	border-width: 2px;
+}
+
+/* 底部按钮7 - 按下态 */
+QPushButton#bottomBtn_7:pressed {
+	border-image: url(:/Resources/MainWindow/2014_btn_down.gft.png);
+	border-width: 2px;
+}
+
+/* =========================== 树形视图 (QTreeView) ============================ */
+/* 树形视图整体样式 */
+QTreeView {
+	border-style: none;
+}
+
+/* 树形视图项 - 默认态 */
+QTreeView::item {
+	color: rgba(255, 255, 255, 0);
+}
+
+/* 树形视图项 - 选中且激活态（焦点在视图时） */
+QTreeView::item:selected:active {
+	background-color: rgba(135, 206, 250, 153);
+}
+
+/* 树形视图项 - 选中非激活态 / 悬浮态 */
+QTreeView::item:selected:!active, QTreeView::item:hover {
+	background-color: rgba(135, 206, 250, 50);
+}
+
+/* =========================== 文本标签样式 ============================ */
+/* 用户名标签 */
+QLabel#userName {
+	font-size: 14px;
+	color: #000000;
+}
+
+/* 个性签名标签 */
+QLabel#signName {
+	font-size: 12px;
+	color: #808080;
+}
+
+/* =========================== 样式修复部分 ============================ */
+/* 滚动区域背景（修复滚动区域背景异常） */
+QScrollArea {
+	background-color: #ffffff;
+}
+
+/* 滚动区域内部容器背景 */
+QScrollArea QWidget#scrollAreaWidgetContents {
+	background-color: #ffffff;
+}
+
+/* 所有 QWidget 子类控件默认字体颜色为黑色（统一字体色） */
+QWidget {
+	color: #000000;
+}
+
+/* =========================== 消息提示框 ============================ */
+/* 统一黑底白字风格，与系统深色主题协调 */
+QMessageBox {
+	background-color: #000000;
+}
+
+QMessageBox QLabel {
+	color: #ffffff;
+}
+
+QMessageBox QPushButton {
+	color: #ffffff;
+	background-color: #2a2a2a;
+	border: 1px solid #5a5a5a;
+	border-radius: 3px;
+	padding: 4px 16px;
+	min-width: 60px;
+}
+
+QMessageBox QPushButton:hover {
+	background-color: #3a3a3a;
+	border: 1px solid #2a9d8f;
+}
+
+QMessageBox QPushButton:pressed {
+	background-color: #1a1a1a;
+}

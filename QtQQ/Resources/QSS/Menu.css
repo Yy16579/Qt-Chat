@@ -1,0 +1,67 @@
+/* 右键菜单整体背景 */
+QMenu {
+	border-image: url(:/Resources/MainWindow/menu/menuex_backgroundSetting.png);
+	border-width: 0;
+}
+
+/* 菜单项 */
+QMenu::item {
+	padding: 6px 24px 6px 36px;
+}
+
+/* 菜单项图标 */
+QMenu::icon {
+	padding: 0px 0px 0px 9px;
+}
+
+/* 菜单分隔线 */
+QMenu::separator {
+	margin-left: 24px;
+	margin-right: 4px;
+	border-image: url(:/Resources/MainWindow/menu/menu_separate.png);
+}
+
+/* 菜单项 - 选中态 */
+QMenu::item:selected {
+	border-image: url(:/Resources/MainWindow/menu/mune_select_bkgSetting.png);
+	padding: 6px 24px 6px 36px;
+}
+
+/* 菜单项 - 悬浮态 */
+QMenu::item:hover {
+	border-image: url(:/Resources/MainWindow/menu/mune_select_bkgSetting.png);
+	padding: 6px 24px 6px 36px;
+}
+
+/* 菜单右箭头（子菜单指示） */
+QMenu::right-arrow {
+	image: url(:/Resources/MainWindow/menu/menuItemEx_arrowTextureSetting.png);
+}
+
+/* =========================== 消息提示框 ============================ */
+/* 统一黑底白字风格，与系统深色主题协调 */
+QMessageBox {
+	background-color: #000000;
+}
+
+QMessageBox QLabel {
+	color: #ffffff;
+}
+
+QMessageBox QPushButton {
+	color: #ffffff;
+	background-color: #2a2a2a;
+	border: 1px solid #5a5a5a;
+	border-radius: 3px;
+	padding: 4px 16px;
+	min-width: 60px;
+}
+
+QMessageBox QPushButton:hover {
+	background-color: #3a3a3a;
+	border: 1px solid #2a9d8f;
+}
+
+QMessageBox QPushButton:pressed {
+	background-color: #1a1a1a;
+}

@@ -1,0 +1,107 @@
+/* 表情窗口主容器 */
+QWidget#EmotionWindow {
+	background-color: #ffffff;
+	border-radius: 4px;
+	border: 1px solid #cccccc;
+}
+
+/* 表情滚动区域 */
+QWidget#scrollArea {
+	background-color: #ffffff;
+	border: 1px solid #eeeeee;
+}
+
+/* 表情承载容器 */
+QWidget#emotionWidget {
+	background-color: transparent;
+}
+
+/* 表情标签项 */
+QLabel#emotionLabelItem {
+	background-color: rgb(250, 230, 236);
+}
+
+/* 表情标签项 - 悬浮态 */
+QLabel#emotionLabelItem:hover {
+	background-color: #ffffff;
+	border: 1px solid rgb(76, 160, 217);
+}
+
+/* 水平滚动条 */
+QScrollBar:horizontal {
+	background: #ffffff;
+	height: 6px;
+}
+
+/* 水平滚动条滑块 */
+QScrollBar::handle:horizontal {
+	background: #cccccc;
+	border-radius: 3px;
+	height: 6px;
+}
+
+/* 水平滚动条左箭头区域 */
+QScrollBar::sub-line:horizontal {
+	background: transparent;
+}
+
+/* 水平滚动条右箭头区域 */
+QScrollBar::add-line:horizontal {
+	background: transparent;
+}
+
+/* 垂直滚动条 */
+QScrollBar:vertical {
+	background-color: rgb(250, 230, 236);
+	width: 6px;
+}
+
+/* 垂直滚动条滑块 */
+QScrollBar::handle:vertical {
+	background: #cccccc;
+	border-radius: 3px;
+	width: 6px;
+}
+
+/* 垂直滚动条上箭头区域 */
+QScrollBar::sub-line:vertical {
+	background: transparent;
+}
+
+/* 垂直滚动条下箭头区域 */
+QScrollBar::add-line:vertical {
+	background: transparent;
+}
+
+/* 表情窗口顶部背景 */
+QWidget#topWidget {
+	border-image: url(:/Resources/MainWindow/emoback.png);
+}
+
+/* =========================== 消息提示框 ============================ */
+/* 统一黑底白字风格，与系统深色主题协调 */
+QMessageBox {
+	background-color: #000000;
+}
+
+QMessageBox QLabel {
+	color: #ffffff;
+}
+
+QMessageBox QPushButton {
+	color: #ffffff;
+	background-color: #2a2a2a;
+	border: 1px solid #5a5a5a;
+	border-radius: 3px;
+	padding: 4px 16px;
+	min-width: 60px;
+}
+
+QMessageBox QPushButton:hover {
+	background-color: #3a3a3a;
+	border: 1px solid #2a9d8f;
+}
+
+QMessageBox QPushButton:pressed {
+	background-color: #1a1a1a;
+}
