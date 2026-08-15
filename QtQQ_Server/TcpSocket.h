@@ -15,7 +15,7 @@ public:
 	void initSocket();
 
 	void setUid(int uid);
-	int getUid();
+	int getUid() const;
 
 signals:
 	//信号

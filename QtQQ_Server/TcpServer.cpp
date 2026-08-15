@@ -1,20 +1,25 @@
 #include "TcpServer.h"
 
 #include <QDebug>
+#include <QtEndian>
 
 
 TcpServer::TcpServer(int port)
 	: m_port(port)
-{}
+{
+	this->registerHandlers();
+}
 
 TcpServer::~TcpServer()
 {
-	// 清理连接表
-	for (QHash<int, TcpSocket*>::iterator it = m_fdSocketMap.begin(); it != m_fdSocketMap.end(); it++) {
-		it.value()->disconnectFromHost();
+	// 1. 断开所有客户端连接
+	for (TcpSocket* socket : m_fdSocketMap) {
+		socket->disconnectFromHost();
 	}
-	// 
 
+	// 2. 清空映射表
+	m_fdSocketMap.clear();
+	m_uidSocketMap.clear();
 }
 
 bool TcpServer::startListen() {
@@ -33,7 +38,7 @@ void TcpServer::incomingConnection(qintptr socketDescriptor) {
 	// socketDescriptor 是操作系统底层的 socket 文件描述符（fd） ，是一个整数
 	// Qt 把底层 fd 交给你，你自己决定怎么包装它
 
-	qDebug() << QStringLiteral("新的连接： fd=%1，总连接数：%2").arg(socketDescriptor).arg(m_fdSocketMap.size() + 1) << '\n';
+	qDebug() << QStringLiteral("新的连接： fd=%1，总连接数：%2").arg(socketDescriptor).arg(m_fdSocketMap.size() + 1);
 
 	// 创建通信 socket 对象
 	TcpSocket* socket = new TcpSocket(this);
@@ -48,6 +53,76 @@ void TcpServer::incomingConnection(qintptr socketDescriptor) {
 	this->m_fdSocketMap.insert(socketDescriptor, socket);
 }
 
+void TcpServer::registerHandlers() {
+	// 注册业务处理函数
+	this->m_handlers.insert(PacketType::Message, &TcpServer::handleMessage);
+	this->m_handlers.insert(PacketType::LoginRequest, &TcpServer::handleLoginRequest);
+	this->m_handlers.insert(PacketType::RegisterRequest, &TcpServer::handleRegisterRequest);
+	this->m_handlers.insert(PacketType::DbQuery, &TcpServer::handleDbQuery);
+	this->m_handlers.insert(PacketType::Heartbeat, &TcpServer::handleHeartbeat);
+}
+
+void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
+	// 解析内层消息体（群标志+发送者ID+接收者ID+消息类型+消息内容），查路由表转发给目标用户
+	
+	// 1. 登录校验：未登录的连接不允许发消息
+	TcpSocket* srcSocket = this->m_fdSocketMap.value(descriptor);
+	if (srcSocket == nullptr || srcSocket->getUid() == -1) {
+		qDebug() << QStringLiteral("[Message] fd=%1 未登录，拒绝转发").arg(descriptor);
+		return;
+	}
+
+	// 2. 长度校验：私聊最小头 = 群标志1 + 发送者5 + 接收者5 + 消息类型1 = 12字节
+	if (dataBody.size() < 12) {
+		qDebug() << QStringLiteral("[Message] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
+		return;
+	}
+
+	// 3. 解析地址字段（固定位置切分，与客户端 sendMessage 拼接格式对应）
+	int groupFlag = dataBody[0] - '0';
+	int sendId = dataBody.mid(1, 5).toInt();
+	int recvId;
+	if (groupFlag == 0) {
+		//为私聊
+		recvId = dataBody.mid(6, 5).toInt();
+		
+		// 查路由表精准转发（转发原包，服务端不关心载荷内容）
+		TcpSocket* targetSocket = this->m_uidSocketMap.value(recvId);
+		if (targetSocket != nullptr) {
+			//对方在线
+			targetSocket->write(fullPacket);
+			qDebug() << QStringLiteral("[Message] %1 → %2 转发成功").arg(sendId).arg(recvId);
+		}
+		else {
+			//对方不在线
+			
+		}
+	}
+	else {
+		//为群聊
+		recvId = dataBody.mid(6, 4).toInt();
+
+	}
+}
+
+void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
+	// TODO: 解析登录数据体，校验账号，绑定 uid，建立路由表映射
+}
+
+void TcpServer::handleRegisterRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
+	// TODO: 解析注册数据体，写入用户表，返回注册结果
+}
+
+void TcpServer::handleDbQuery(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
+	// TODO: 解析查询请求（SQL+参数），执行数据库查询，打包结果回发
+}
+
+void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
+	// TODO: 更新客户端最后活跃时间（后期做心跳超时检测）
+}
+
+
+//槽函数
 void TcpServer::onPacketReady(const QByteArray& data, int descriptor) {
 	//	TcpServer（业务层）
 	//		├─ 接收完整包
@@ -57,9 +132,45 @@ void TcpServer::onPacketReady(const QByteArray& data, int descriptor) {
 	//		├─ 按包类型分发到对应处理函数
 	//		└─ 各处理函数执行具体业务（消息转发 / 登录 / 数据库查询等）
 
+	// 1. 长度校验：至少要有完整外层包头
+	if (data.size() < PACKET_HEADER_SIZE) {
+		qDebug() << QStringLiteral("数据包过短(%1字节)，丢弃").arg(data.size());
+		return;
+	}
 
+	// 2. 解析外层包头（均大端序）
+	quint16 magic = qFromBigEndian<quint16>(data.constData() + 0);	// 魔数
+	quint8  version = static_cast<quint8>(data[2]);					// 版本
+	quint16 packetType = qFromBigEndian<quint16>(data.constData() + 3);	// 包类型
+	quint16 dataLength = qFromBigEndian<quint16>(data.constData() + 5);	// 数据体长度
 
-	
+	// 3. 校验包头合法性
+	if (magic != PACKET_MAGIC) {
+		qDebug() << QStringLiteral("魔数错误:0x%1，丢弃").arg(magic, 4, 16, QChar('0'));
+		return;
+	}
+	if (version != PACKET_VERSION) {
+		qDebug() << QStringLiteral("版本不匹配:期望%1实际%2，丢弃").arg(PACKET_VERSION).arg(version);
+		return;
+	}
+	if (dataLength != data.size() - PACKET_HEADER_SIZE) {
+		qDebug() << QStringLiteral("数据长度不一致:头中%1实际%2，丢弃")
+			.arg(dataLength).arg(data.size() - PACKET_HEADER_SIZE);
+		return;
+	}
+
+	// 4. 提取数据体（剥离外层包头）
+	QByteArray dataBody = data.mid(PACKET_HEADER_SIZE);
+
+	// 5. 查业务表分发
+	auto it = this->m_handlers.find(static_cast<PacketType>(packetType));
+	if (it != m_handlers.end()) {
+		(this->*it.value())(data, dataBody, descriptor);
+	}
+	else {
+		qDebug() << QStringLiteral("未知包类型:0x%1，fd=%2，丢弃")
+			.arg(packetType, 4, 16, QChar('0')).arg(descriptor);
+	}
 }
 
 void TcpServer::onClientDisconnected(int descriptor) {
@@ -68,8 +179,10 @@ void TcpServer::onClientDisconnected(int descriptor) {
 	
 	// 2. 如果已登录，从路由表移除
 	if (socket && socket->getUid() != -1) {
-		m_uidSocketMap.remove(socket->getUid());
-		qDebug() << QStringLiteral("用户 uid=%1 已从路由表移除").arg(socket->getUid());
+		if (m_uidSocketMap.value(socket->getUid()) == socket) {
+			m_uidSocketMap.remove(socket->getUid());
+			qDebug() << QStringLiteral("用户 uid=%1 已从路由表移除").arg(socket->getUid());
+		}
 	}
 
 	// 3. 从连接表移除
@@ -81,5 +194,7 @@ void TcpServer::onClientDisconnected(int descriptor) {
 	}
 
 	qDebug() << QStringLiteral("客户端断开 fd=%1，剩余连接数：%2")
-		.arg(descriptor).arg(m_fdSocketMap.size()) << '\n';
+		.arg(descriptor).arg(m_fdSocketMap.size());
 }
+
+

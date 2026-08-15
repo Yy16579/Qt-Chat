@@ -5,6 +5,7 @@
 #include <QHostAddress>
 #include <QMessageBox>
 #include <QtEndian>
+#include <QDebug>
 
 
 TcpClient::TcpClient()
@@ -54,11 +55,14 @@ void TcpClient::connectToServer() {
 		});
 
 		//监听 socket  connected 信号
-		connect(m_tcpClientSocket, &QAbstractSocket::connected,
+		connect(this->m_tcpClientSocket, &QAbstractSocket::connected,
 			this, [this]() {
 				// connect 成功，打印连接成功消息
 				qDebug() << "TCP connected";
 		});
+
+		//监听 socket  readyRead 信号
+		connect(this->m_tcpClientSocket, &QTcpSocket::readyRead, this, &TcpClient::onReadyRead);
 	}
 
 	//向服务端发起连接
@@ -95,8 +99,8 @@ void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 		return;
 	}
 
-	//对数据进行封包
-	QString strSend;		//发送数据包
+	//拼接内部数据
+	QString strSend;		//内部数据包
 
 	//数据包字段
 	QString strGroupFlag = groupFlag ? "1" : "0";	//群聊标志，0私聊 1群聊
@@ -170,5 +174,143 @@ void TcpClient::sendPacket(quint16 packetType, const QByteArray& dataBody) {
 
 	//发送
 	this->m_tcpClientSocket->write(packet);
+}
+
+void TcpClient::onProcessPacket(const QByteArray& packet) {
+	//	TcpClient（业务层）：
+	//		├─ 解析外层包头（魔数、版本、包类型、数据长度）
+	//		├─ 校验包头合法性（魔数、版本、长度）
+	//		└─ 按包类型分发
+
+	// 1. 长度校验：至少要有完整外层包头
+	if (packet.size() < PACKET_HEADER_SIZE) {
+		qDebug() << QStringLiteral("数据包过短(%1字节)，丢弃").arg(packet.size());
+		return;
+	}
+
+	// 2. 解析外层包头（均大端序）
+	quint16 magic = qFromBigEndian<quint16>(packet.constData() + 0);			//魔数
+	quint8  version = static_cast<quint8>(packet[2]);							//版本
+	quint16 packetType = qFromBigEndian<quint16>(packet.constData() + 3);		//包类型
+	quint16 dataLength = qFromBigEndian<quint16>(packet.constData() + 5);		//数据体长度
+
+	// 3. 校验包头合法性
+	if (magic != PACKET_MAGIC) {
+		qDebug() << QStringLiteral("魔数错误:0x%1，丢弃").arg(magic, 4, 16, QChar('0'));
+		return;
+	}
+	if (version != PACKET_VERSION) {
+		qDebug() << QStringLiteral("版本不匹配:期望%1实际%2，丢弃").arg(PACKET_VERSION).arg(version);
+		return;
+	}
+	if (dataLength != packet.size() - PACKET_HEADER_SIZE) {
+		qDebug() << QStringLiteral("数据长度不一致:头中%1实际%2，丢弃")
+			.arg(dataLength).arg(packet.size() - PACKET_HEADER_SIZE);
+		return;
+	}
+
+	// 4. 提取数据体（剥离外层包头）
+	QByteArray dataBody = packet.mid(PACKET_HEADER_SIZE);
+
+	// 5. 按包类型触发业务信号 ============================================================================================
+	if (packetType == static_cast<quint16>(PacketType::Message)) {
+		// ===== 消息包 =====
+		// 解析内层（群标志 + 发送者ID + 接收者ID + 消息类型 + 消息内容）
+		if (dataBody.size() < 11) {
+			//最小头：群聊 1+5+4+1 = 11字节
+			qDebug() << QStringLiteral("[Message] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
+			return;
+		}
+
+		// 消息字段
+		int groupFlag = dataBody[0] - '0';		//群标志：0私聊 1群聊
+		int sendId = dataBody.mid(1, 5).toInt();	//发送者ID
+		int recvId = 0;		//接收者ID
+		int msgType = 0;	//消息类型
+		QString msg;		//消息内容
+
+		if (groupFlag == 0) {
+			//私聊：接收者ID占5位，消息类型在偏移11
+			if (dataBody.size() < 12) {
+				qDebug() << QStringLiteral("[Message] 私聊数据体过短(%1字节)，丢弃").arg(dataBody.size());
+				return;
+			}
+			recvId = dataBody.mid(6, 5).toInt();
+			msgType = dataBody.mid(11, 1).toInt();
+			msg = QString::fromUtf8(dataBody.mid(12));
+		}
+		else {
+			//群聊：接收者为4位群ID，消息类型在偏移10
+			recvId = dataBody.mid(6, 4).toInt();
+			msgType = dataBody.mid(10, 1).toInt();
+			msg = QString::fromUtf8(dataBody.mid(11));
+		}
+
+		qDebug() << QStringLiteral("[Message] 收到消息：%1 → %2，类型%3")
+			.arg(sendId).arg(recvId).arg(msgType);
+
+		//解析完成，发射信号交给 UI 层（TalkWindow）显示
+		emit this->signalMessageReceived(groupFlag, sendId, recvId, msgType, msg);
+	}
+	else {
+		//
+
+
+	}
+}
+
+
+//槽函数
+void TcpClient::onReadyRead() {
+	//	TcpClient（网络层）：
+	//		├─ 读取字节流
+	//		├─ 粘包处理
+	//		├─ 拆出完整应用层协议包
+	//		└─ 交由 onProcessPacket 解析分发
+
+	// 1. 读取所有可用数据，追加到缓冲区
+	this->m_buffer.append(this->m_tcpClientSocket->readAll());
+
+	// 2. 循环切包：只要缓冲区里有完整包就取出
+	while (this->m_buffer.size() >= PACKET_HEADER_SIZE) {
+		// 2.1 校验魔数（偏移0，2字节，大端序）
+		quint16 magic = qFromBigEndian<quint16>(this->m_buffer.constData());
+
+		if (magic != PACKET_MAGIC) {
+			//魔数错误：数据错位或非法数据
+			//进阶处理：在缓冲区中查找下一个魔数位置，丢弃错误数据，重新对齐数据流
+			static const QByteArray magicBytes = QByteArray::fromRawData("\x5A\x5A", 2);
+			int nextMagicPos = this->m_buffer.indexOf(magicBytes, 1);
+
+			if (nextMagicPos > 0) {
+				//找到下一个魔数：丢弃错误数据，从魔数位置继续处理
+				qDebug() << QStringLiteral("魔数错误，丢弃 %1 字节错误数据，从下一个魔数重新对齐")
+					.arg(nextMagicPos);
+				this->m_buffer.remove(0, nextMagicPos);
+				continue;	//重新回到 while 开头，重新校验魔数
+			}
+			else {
+				//找不到下一个魔数：全部丢弃
+				qDebug() << QStringLiteral("魔数错误且未找到下一个魔数，丢弃缓冲区所有数据");
+				this->m_buffer.clear();
+				break;
+			}
+		}
+
+		// 2.2 解析数据长度字段（偏移5，2字节，大端序）
+		quint16 dataLength = qFromBigEndian<quint16>(this->m_buffer.constData() + 5);	//数据体长度
+		quint16 packetSize = PACKET_HEADER_SIZE + dataLength;		//数据包总长度
+
+		// 2.3 缓冲区数据不足一个完整包，等待下次数据到达
+		if (this->m_buffer.size() < packetSize) {
+			break;
+		}
+
+		// 2.4 取出一个完整包，交由业务层解析
+		QByteArray packet = this->m_buffer.left(packetSize);
+		this->m_buffer.remove(0, packetSize);
+
+		this->onProcessPacket(packet);
+	}
 }
 

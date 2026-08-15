@@ -17,7 +17,7 @@ public:
 	void connectToServer();			//创建套接字，向服务端发起连接
 
 public:
-	// 不同类型数据包的打包发送接口 ===================================================================================
+	// 数据包打包发送接口 ===================================================================================
 	// 拼接内部数据
 	// ===== 消息类接口 =====
 	// 发送消息包
@@ -44,6 +44,10 @@ private:
 	// =================================================================================================================
 
 private:
+	// 解析外层包头（魔数、版本、包类型、数据长度），校验后按包类型触发业务信号
+	void onProcessPacket(const QByteArray& packet);
+
+private:
 	TcpClient();
 	~TcpClient();
 	TcpClient(const TcpClient&) = delete;
@@ -53,8 +57,20 @@ signals:
 	//信号
 	void signalErrorOccurred(const QString& errorMsg);		//通用错误提示信号
 
+	// 数据包业务分发信号 ======================================================================================
+	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
+	
+	
+	// =================================================================================================================
+
+private slots:
+	//槽函数
+	void onReadyRead();			//响应 readyRead 信号，负责 接收数据包 粘包切包 处理
+
 private:
 	//成员变量
 	QTcpSocket* m_tcpClientSocket;
+
+	QByteArray m_buffer;	//数据包接收缓冲区
 
 };

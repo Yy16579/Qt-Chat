@@ -27,10 +27,12 @@ void TcpSocket::setUid(int uid) {
 	this->m_uid = uid;
 }
 
-int TcpSocket::getUid() {
+int TcpSocket::getUid() const {
 	return this->m_uid;
 }
 
+
+//槽函数
 void TcpSocket::onReadyRead() {
 	//	TcpSocket（网络层）：
 	//		├─ 读取字节流

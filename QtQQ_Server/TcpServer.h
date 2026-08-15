@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TcpSocket.h"
+#include "Protocol.h"
 
 #include <QTcpServer>
 #include <QHash>
@@ -21,9 +22,19 @@ protected:
 	//客户端发来连接时 Qt 自动调用
 	void incomingConnection(qintptr socketDescriptor) override;		
 
-signals:
-	//信号
-	
+private:
+	void registerHandlers();		//注册业务表
+
+	// 业务处理函数 =========================================================================================
+	// 参数说明：fullPacket = 完整原始包（含外层包头，转发场景直接使用）
+	//           dataBody  = 数据体（剥离外层包头后的业务数据）
+	//           descriptor = 来源客户端的 fd 标识
+	void handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 消息包：私聊/群聊转发
+	void handleLoginRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);		// 登录请求：绑定uid，建立路由映射
+	void handleRegisterRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);	// 注册请求
+	void handleDbQuery(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 数据库查询请求
+	void handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 心跳包：保活
+	// ======================================================================================================
 
 private slots:
 	//槽函数
@@ -36,6 +47,6 @@ private:
 
 	QHash<int, TcpSocket*> m_fdSocketMap;		// 连接表：fd → socket（用于连接管理、广播、断开清理）
 	QHash<int, TcpSocket*> m_uidSocketMap;		// 路由表：uid → socket（用于精准转发）（客户端成功登录时添加）
-
+	QHash<PacketType, void (TcpServer::*)(const QByteArray&, const QByteArray&, int)> m_handlers;		// 业务表
 };
 
