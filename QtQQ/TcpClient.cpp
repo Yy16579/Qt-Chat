@@ -71,6 +71,8 @@ void TcpClient::connectToServer() {
 }
 
 void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file) {
+	// 拼接内层（群标识 + 发送方ID + 接收方ID + 消息类型 + 消息内容）
+	
 	//接收到的参数：
 	//		例1（纯表情）   :		(0, "1images023")	
 	//		例2（纯文本）   :		(1, "你好")
@@ -140,7 +142,20 @@ void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 }
 
 void TcpClient::sendLoginRequest(const QString& account, const QString& password) {
+	// 拼接内层（账号 + "|" + 密码）
 
+	//先检查 socket 状态
+	if (!m_tcpClientSocket || m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
+		emit signalErrorOccurred(QStringLiteral("未连接到服务器"));
+		return;
+	}
+	
+	//拼接内部数据（账号非定长，使用 "|" 与密码进行分隔）
+	QString strSend;		//内部数据包
+	strSend = account + "|" + password;
+
+	//组装外层二进制头并发送（包类型=LoginRequest）
+	this->sendPacket(static_cast<quint16>(PacketType::LoginRequest), strSend.toUtf8());
 }
 
 void TcpClient::sendRegisterRequest(const QString& account, const QString& password, const QString& name) {
@@ -156,7 +171,7 @@ void TcpClient::sendHeartbeat() {
 }
 
 void TcpClient::sendPacket(quint16 packetType, const QByteArray& dataBody) {
-	//拼接包头并发送
+	//拼接包头
 	QByteArray packet;
 	//1. 魔数（大端）
 	quint16 magic = qToBigEndian(PACKET_MAGIC);
@@ -180,7 +195,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 	//	TcpClient（业务层）：
 	//		├─ 解析外层包头（魔数、版本、包类型、数据长度）
 	//		├─ 校验包头合法性（魔数、版本、长度）
-	//		└─ 按包类型分发
+	//		└─ 按包类型分发业务
 
 	// 1. 长度校验：至少要有完整外层包头
 	if (packet.size() < PACKET_HEADER_SIZE) {
@@ -212,7 +227,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 	// 4. 提取数据体（剥离外层包头）
 	QByteArray dataBody = packet.mid(PACKET_HEADER_SIZE);
 
-	// 5. 按包类型触发业务信号 ============================================================================================
+	// 5. 按包类型分发业务 ============================================================================================
 	if (packetType == static_cast<quint16>(PacketType::Message)) {
 		// ===== 消息包 =====
 		// 解析内层（群标志 + 发送者ID + 接收者ID + 消息类型 + 消息内容）
@@ -252,11 +267,31 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 		//解析完成，发射信号交给 UI 层（TalkWindow）显示
 		emit this->signalMessageReceived(groupFlag, sendId, recvId, msgType, msg);
 	}
-	else {
-		//
+	else if (packetType == static_cast<quint16>(PacketType::LoginResponse)) {
+		// ===== 登录响应包 =====
+		// 解析内层（结果标志1B + 用户ID 5B）
+		// 格式：成功 "1" + "10001"；失败 "0"
+		if (dataBody.size() < 1) {
+			qDebug() << QStringLiteral("[LoginResponse] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
+			return;
+		}
 
+		bool result = (dataBody[0] == '1');		//结果标志：'1'成功 '0'失败
+		int empID = 0;							//用户 employeeID（成功时有效）
 
+		if (result == true) {
+			//成功：数据体至少要有 结果标志1 + uid 5 = 6字节
+			if (dataBody.size() < 6) {
+				qDebug() << QStringLiteral("[LoginResponse] 成功响应缺少uid字段，丢弃");
+				return;
+			}
+			empID = dataBody.mid(1, 5).toInt();
+		}
+
+		//解析完成，发射信号交给 UI 层（UserLogin）处理界面跳转
+		emit this->signalLoginResponse(result, empID);
 	}
+	// ================================================================================================================
 }
 
 

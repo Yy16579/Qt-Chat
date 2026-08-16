@@ -49,8 +49,13 @@ void UserLogin::initControl() {
 	headlabel->setPixmap(this->getRoundImage(pix, mask, headlabel->size()));
 	headlabel->move(this->width()/2-34, ui.titleWidget->height()-34);
 	
-	//连接登录按钮 信号槽
+	//连接信号槽
 	connect(ui.loginBtn, &QPushButton::clicked, this, &UserLogin::onLoginBtnClicked);
+
+	//初始化登录超时定时器（单次触发，5秒无响应视为服务端异常）
+	this->m_loginTimer.setSingleShot(true);
+	this->m_loginTimer.setInterval(5000);
+	connect(&this->m_loginTimer, &QTimer::timeout, this, &UserLogin::onLoginTimeout);
 }
 
 void UserLogin::initTcpConnect() {
@@ -61,6 +66,8 @@ void UserLogin::initTcpConnect() {
 				QStringLiteral("错误：") + errorMsg);
 		});
 
+	//监听 TcpClient 的登录响应信号
+	connect(&TcpClient::getInstance(), &TcpClient::signalLoginResponse, this, &UserLogin::onLoginResponse);
 
 	//通过 TcpClient 单例向服务端发起连接
 	TcpClient::getInstance().connectToServer();
@@ -90,88 +97,50 @@ bool UserLogin::connectMySql() {
 	}
 }
 
-bool UserLogin::verifyAccountCode(int& empID) {
-	//查询数据库，验证账号密码是否正确，正确会修改形参为用户 employeeID
 
-	//提取用户当前输入框的 账号密码
-	QString strAccountInput = ui.editUserAccount->text();
-	QString strCodeInput = ui.editPassword->text();
-
-	//登陆方式一：按 employeeID 进行登录
-	//employeeID 是 int 类型，需先判断输入是否为纯数字，避免非数字输入导致 SQL 语法错误
-	bool isNumber = false;
-	strAccountInput.toInt(&isNumber);
-
-	if (isNumber) {
-		//根据用户输入的 employeeID ，从数据库获取对应的密码
-		//对应  C API  --------  mysql_real_query();
-		//			   --------  mysql_store_result();
-		QSqlQuery query;
-		query.prepare("SELECT `code` FROM `tab_accounts` WHERE `employeeID` = ?");
-		query.addBindValue(strAccountInput.toInt());
-		bool ok = query.exec();
-		if (ok == false) {
-			//sql命令执行失败
-			return false;
-		}
-
-		if (query.next()) {			//对应  C API  --------  mysql_fetch_row();
-			//成功读取密码
-			QString sqlCode = query.value(0).toString();
-			if (sqlCode == strCodeInput) {
-				//密码正确，记录用户 employeeID
-				empID = strAccountInput.toInt();
-				return true;
-			}
-			else {
-				//密码错误
-				return false;
-			}
-		}
-	}
-	//若输入非数字，或方式一未找到记录，继续尝试方式二
-
-	//登陆方式二：按 account 进行登录
-	//根据用户输入的 account ，从数据库获取对应的密码
-	QSqlQuery query;
-	query.prepare("SELECT `code`, `employeeID` FROM `tab_accounts` WHERE `account` = ?");
-	query.addBindValue(strAccountInput);
-	bool ok = query.exec();
-	if (ok == false) {
-		//sql命令执行失败
-		return false;
-	}
-
-	if (query.next()) {
-		QString sqlCode = query.value(0).toString();
-		if (sqlCode == strCodeInput) {
-			//密码正确，记录用户 employeeID
-			empID = query.value(1).toInt();
-			return true;
-		}
-		else {
-			//密码错误
-			return false;
-		}
-	}
-	
-	return false;
-}
-
-
+//槽函数
 void UserLogin::onLoginBtnClicked() {
-	//临时变量，用于记录用户 employeeID
-	int empID = -1;
+	// 提取输入框的账号密码
+	QString account = ui.editUserAccount->text();
+	QString password = ui.editPassword->text();
 
-	//点击登录按钮后，先验证账号密码是否正确
-	if (this->verifyAccountCode(empID) == false) {
-		QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("您输入的账号密码有误，请重新输入！"));
+	// 输入判空：避免无效请求发往服务端
+	if (account.isEmpty() || password.isEmpty()) {
+		QMessageBox::information(this, QStringLiteral("提示"),
+			QStringLiteral("账号或密码不能为空！"));
 		return;
 	}
 
-	//账号密码正确，传入用户 employeeID ，进入主窗口
-	this->close();
-	CCMainWindow* mainwindow = new CCMainWindow(empID);
-	mainwindow->show();
+	// 向服务端发起登录请求，并启动超时定时器
+	TcpClient::getInstance().sendLoginRequest(account, password);
+	this->m_loginTimer.start();
+}
+
+void UserLogin::onLoginResponse(bool result, int empID) {
+	//收到响应，无论成败先停止超时定时器
+	this->m_loginTimer.stop();
+
+	//查看登录响应结果
+	if (result == true) {
+		//账号密码正确，传入用户 employeeID ，进入主窗口
+		this->close();
+		CCMainWindow* mainwindow = new CCMainWindow(empID);
+		mainwindow->show();
+	}
+	else {
+		//账号密码错误，弹出提示框
+		QMessageBox::information(this, QStringLiteral("提示"),
+			QStringLiteral("您输入的账号密码有误，请重新输入！"));
+	}
+
+	qDebug() << QStringLiteral("[LoginResponse] 登录%1，uid=%2")
+		.arg(result ? QStringLiteral("成功") : QStringLiteral("失败"))
+		.arg(result ? empID : -1);
+}
+
+void UserLogin::onLoginTimeout() {
+	//服务端5秒内未响应（未启动/网络中断/处理异常），提示用户
+	QMessageBox::warning(this, QStringLiteral("提示"),
+		QStringLiteral("登录超时，请检查服务端是否已启动！"));
 }
 

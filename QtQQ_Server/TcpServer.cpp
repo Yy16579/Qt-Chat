@@ -2,6 +2,8 @@
 
 #include <QDebug>
 #include <QtEndian>
+#include <QSqlQuery> 
+#include <QSqlError>
 
 
 TcpServer::TcpServer(int port)
@@ -54,7 +56,7 @@ void TcpServer::incomingConnection(qintptr socketDescriptor) {
 }
 
 void TcpServer::registerHandlers() {
-	// 注册业务处理函数
+	// 注册业务表
 	this->m_handlers.insert(PacketType::Message, &TcpServer::handleMessage);
 	this->m_handlers.insert(PacketType::LoginRequest, &TcpServer::handleLoginRequest);
 	this->m_handlers.insert(PacketType::RegisterRequest, &TcpServer::handleRegisterRequest);
@@ -106,7 +108,96 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 }
 
 void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
-	// TODO: 解析登录数据体，校验账号，绑定 uid，建立路由表映射
+	// 解析内层消息体（账号 + "|" + 密码）
+
+	// 1. 解包，校验格式，提取包中的账号密码
+	QList<QByteArray> fields = dataBody.split('|');
+	if (fields.size() < 2 || fields.at(0).isEmpty() || fields.at(1).isEmpty()) {
+		qDebug() << QStringLiteral("[LoginRequest] fd=%1 数据体格式错误，回发失败").arg(descriptor);
+		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), "0", this->m_fdSocketMap.value(descriptor));
+		return;
+	}
+	QString account = QString::fromUtf8(fields.at(0));		//账号
+	QString password = QString::fromUtf8(fields.at(1));		//密码
+
+	// 2. 查询数据库验证（双方式登录）
+	QString result = "0";		//结果标志：'1'成功 '0'失败
+	QString empID = "";			//用户 employeeID（成功时有效）
+	bool found = false;			//是否查到账号记录
+
+	//账号为纯数字时，才按 employeeID 查询（int 列绑定数字，避免字符串隐式转换）
+	bool isNumber = false;
+	int accountNum = account.toInt(&isNumber);
+
+	QSqlQuery query;
+	if (isNumber) {
+		//方式一：按 employeeID 查询
+		query.prepare("SELECT `code` FROM `tab_accounts` WHERE `employeeID` = ?");
+		query.addBindValue(accountNum);
+		query.exec();
+		found = query.next();
+
+		if (found == true && query.value(0).toString() == password) {
+			//密码正确
+			result = "1";
+			empID = QString::number(accountNum);
+		}
+		//employeeID 未命中记录 → 继续方式二
+	}
+
+	if (found == false) {
+		//方式二：按 account 字段查询（账号非数字，或方式一未命中记录）
+		query.prepare("SELECT `code`, `employeeID` FROM `tab_accounts` WHERE `account` = ?");
+		query.addBindValue(account);
+		query.exec();
+		if (query.next() == true) {
+			found = true;
+			if (query.value(0).toString() == password) {
+				//密码正确
+				result = "1";
+				empID = query.value(1).toString();
+			}
+		}
+	}
+
+	// 3. 打包回发登录响应
+	//格式：成功 = 结果标志1B + uid5B（客户端按 mid(1,5) 定长解析，uid 不足5位需补零）；失败 = "0"
+	QString data;
+	if (result == "1") {
+		data = result + empID.rightJustified(5, '0');
+		qDebug() << QStringLiteral("[LoginRequest] fd=%1 登录成功，uid=%2").arg(descriptor).arg(empID);
+	}
+	else {
+		data = result;
+		qDebug() << QStringLiteral("[LoginRequest] fd=%1 账号密码验证失败").arg(descriptor);
+	}
+	this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), data.toUtf8(), this->m_fdSocketMap.value(descriptor));
+
+	// 4. 若成功登录，添加至路由表
+	if (result == "1") {
+		int uid = empID.toInt();
+		TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
+		
+		if (this->m_uidSocketMap.contains(uid) == true) {
+			// 路由表中存在登录记录
+			// 重复登录：断开旧连接（触发 onClientDisconnected 清理）
+			TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
+			
+			if (oldSocket == socket) {
+				return;
+			}	
+			oldSocket->disconnectFromHost();
+		}
+
+		// 同连接切换账号：先移除本连接旧 uid 的映射，避免路由表残留悬空指针
+		int oldUid = socket->getUid();
+		if (oldUid != -1 && oldUid != uid) {
+			this->m_uidSocketMap.remove(oldUid);
+		}
+
+		socket->setUid(uid);				//设置 socket 的 uid 字段
+		this->m_uidSocketMap.insert(uid, socket);	//添加至路由表
+	}
 }
 
 void TcpServer::handleRegisterRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
@@ -119,6 +210,27 @@ void TcpServer::handleDbQuery(const QByteArray& fullPacket, const QByteArray& da
 
 void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
 	// TODO: 更新客户端最后活跃时间（后期做心跳超时检测）
+}
+
+void TcpServer::sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target) {
+	//拼接包头
+	QByteArray packet;
+	//1. 魔数（大端）
+	quint16 magic = qToBigEndian(PACKET_MAGIC);
+	packet.append(reinterpret_cast<const char*>(&magic), 2);
+	//2. 版本
+	packet.append(static_cast<char>(PACKET_VERSION));
+	//3. 包类型（大端）
+	quint16 type = qToBigEndian(packetType);
+	packet.append(reinterpret_cast<const char*>(&type), 2);
+	//4. 数据长度（大端）
+	quint16 len = qToBigEndian(static_cast<quint16>(dataBody.size()));
+	packet.append(reinterpret_cast<const char*>(&len), 2);
+	//5. 数据体
+	packet.append(dataBody);
+
+	//发送
+	target->write(packet);
 }
 
 
@@ -162,7 +274,7 @@ void TcpServer::onPacketReady(const QByteArray& data, int descriptor) {
 	// 4. 提取数据体（剥离外层包头）
 	QByteArray dataBody = data.mid(PACKET_HEADER_SIZE);
 
-	// 5. 查业务表分发
+	// 5. 查业务表分发业务
 	auto it = this->m_handlers.find(static_cast<PacketType>(packetType));
 	if (it != m_handlers.end()) {
 		(this->*it.value())(data, dataBody, descriptor);

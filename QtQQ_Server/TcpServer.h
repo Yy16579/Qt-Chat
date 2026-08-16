@@ -36,10 +36,14 @@ private:
 	void handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 心跳包：保活
 	// ======================================================================================================
 
+private:
+	// 数据包 包头拼接与发送
+	void sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target);
+
 private slots:
 	//槽函数
-	void onPacketReady(const QByteArray& data, int descriptor);		//接收完整数据包，处理业务层逻辑
-	void onClientDisconnected(int descriptor);						//客户端断开连接
+	void onPacketReady(const QByteArray& data, int descriptor);		// 解析数据包，分发业务
+	void onClientDisconnected(int descriptor);						// 客户端断开连接
 
 private:
 	//成员变量

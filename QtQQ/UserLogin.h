@@ -1,8 +1,9 @@
 #pragma once
 
-#include "basicwindow.h"
 #include "ui_UserLogin.h"
+#include "basicwindow.h"
 
+#include <QTimer>
 
 
 class UserLogin : public BasicWindow
@@ -18,11 +19,16 @@ private:
 	void initTcpConnect();		//初始化网络连接
 
 	bool connectMySql();		//初始化数据库连接
-	bool verifyAccountCode(int& empID);		//验证账号密码是否正确
 
 private slots:
 	//槽函数
 	void onLoginBtnClicked();
+	void onLoginResponse(bool result, int empID);	//登录响应处理
+	void onLoginTimeout();		//登录请求超时处理
+
+private:
+	//成员变量
+	QTimer m_loginTimer;	//登录超时定时器（发出请求后启动，收到响应或超时后停止）
 
 private:
 	Ui::UserLogin ui;

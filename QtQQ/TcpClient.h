@@ -21,7 +21,7 @@ public:
 	// 拼接内部数据
 	// ===== 消息类接口 =====
 	// 发送消息包
-	void sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file = "");	//打包并发送数据
+	void sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file = "");
 
 	// ===== 认证类接口 =====
 	// 发送登录请求
@@ -44,7 +44,7 @@ private:
 	// =================================================================================================================
 
 private:
-	// 解析外层包头（魔数、版本、包类型、数据长度），校验后按包类型触发业务信号
+	// 解析数据包，分发业务
 	void onProcessPacket(const QByteArray& packet);
 
 private:
@@ -59,7 +59,7 @@ signals:
 
 	// 数据包业务分发信号 ======================================================================================
 	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
-	
+	void signalLoginResponse(bool result, int empID);
 	
 	// =================================================================================================================
 
@@ -72,5 +72,4 @@ private:
 	QTcpSocket* m_tcpClientSocket;
 
 	QByteArray m_buffer;	//数据包接收缓冲区
-
 };
