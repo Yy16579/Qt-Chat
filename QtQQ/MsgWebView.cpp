@@ -1,5 +1,4 @@
 #include "MsgWebView.h"
-#include "TcpClient.h"
 #include "WindowManager.h"
 
 #include <QFile>
@@ -68,23 +67,13 @@ QString MsgHtmlObj::getMsgtmplHtml(const QString& code)
 	// 将数据全部读取出来，然后再 返回
 	QFile file(":/Resources/MainWindow/MsgHtml/" + code + ".html");
 
-	file.open(QFile::ReadOnly);
-	QString strData;
-
-	if (file.isOpen())
-	{
-		// 全部一次性读取
-		strData = QLatin1String(file.readAll());
-	}
-	else
-	{
-		// information（父窗体指针，标题，提示内容）;
-		// 因为当前写代码的对象，是从 QObject 派生来的，不是从某个部件派生来的
-		// 因此要写 空
+	//先检查 open 返回值，失败时弹窗提示并返回空串
+	if (!file.open(QFile::ReadOnly)) {
 		QMessageBox::information(nullptr, "Tips", "Failed to init html!");
-		return QString("");			// 返回空
+		return QString("");
 	}
 
+	QString strData = QLatin1String(file.readAll());
 	file.close();
 
 	return strData;
@@ -122,21 +111,71 @@ MsgWebView::MsgWebView(QWidget* parent)
 	// 通道
 	this->m_msgHtmlObj = new MsgHtmlObj(this);
 
-	// 注册
+	// 注册自己的消息模板对象（右侧气泡，显示"我"发出的消息）
 	this->m_channel->registerObject("external0", m_msgHtmlObj);
-
-	
-
 
 	// 设置当前网页，网络通道
 	this->page()->setWebChannel(m_channel);
 
-	// 加载网页，进行初始化
-	this->load(QUrl("qrc:/Resources/MainWindow/MsgHtml/msgTmpl.html"));
+	//注意：此处不 load 页面，延迟到 init() 中
+	//必须先注册完所有消息发送者的模板对象（external_<uid>），页面加载时
+	//QWebChannel 才能把它们全部暴露给 JS，否则 JS 侧取到 undefined
 }
 
 MsgWebView::~MsgWebView()
 {}
+
+void MsgWebView::init(int talkUid, bool isGroupTalk) {
+	//注册消息发送者对应的头像模板对象
+	//JS 侧通过 external_<uid>.msgLHtmlTmpl 取"该发送者头像"的左侧气泡模板
+
+	//查询数据库用的头像路径
+	QString picPath;
+	QSqlQuery query;
+
+	if (isGroupTalk == false) {
+		//单聊：只注册对方（对端用户）的头像模板
+		query.prepare("SELECT `picture` FROM `tab_employees` WHERE `employeeID` = ?");
+		query.addBindValue(talkUid);
+		query.exec();
+		if (query.next()) {
+			picPath = query.value(0).toString();
+		}
+		this->m_channel->registerObject(QString("external_%1").arg(talkUid), new MsgHtmlObj(this, picPath));
+	}
+	else {
+		//群聊：注册全部群成员的头像模板（收到谁的消息就用谁的模板显示）
+		//公司群 = 所有在职员工；部门群 = 该部门在职员工
+		int compDepID = -1;
+		query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
+		query.addBindValue(QStringLiteral("公司群"));
+		query.exec();
+		if (query.next()) {
+			compDepID = query.value(0).toInt();
+		}
+
+		if (talkUid == compDepID) {
+			//公司群：查询所有在职员工
+			query.prepare("SELECT `employeeID`, `picture` FROM `tab_employees` WHERE `status` = ?");
+			query.addBindValue(1);
+		}
+		else {
+			//部门群：查询该部门在职员工
+			query.prepare("SELECT `employeeID`, `picture` FROM `tab_employees` WHERE `status` = ? AND `departmentID` = ?");
+			query.addBindValue(1);
+			query.addBindValue(talkUid);
+		}
+		query.exec();
+		while (query.next()) {
+			this->m_channel->registerObject(
+				QString("external_%1").arg(query.value(0).toInt()),
+				new MsgHtmlObj(this, query.value(1).toString()));
+		}
+	}
+
+	//所有对象注册完成，最后才加载页面
+	this->load(QUrl("qrc:/Resources/MainWindow/MsgHtml/msgTmpl.html"));
+}
 
 void MsgWebView::appendMsg(const QString& html, const QString strObj) {
 	// 1.入参 :  html (QString) = "<span>你好</span><img src=\"qrc:/Resources/MainWindow/emotion/23.png\"/>"
@@ -154,14 +193,37 @@ void MsgWebView::appendMsg(const QString& html, const QString strObj) {
 			//		转化为 ------->
 			//		msgList = [
 			//						["text", "你好"],
-			//						["img", "qrc:/Resources/MainWindow/emotion/1.png"]				
+			//						["img", "qrc:/Resources/MainWindow/emotion/1.png"]
 			//			       ]
 			// -------------------------------------------------------------------------------
 			// 将 html ( QString 类型）  -------->   msgList ( QList<QStringList> 类型)
 
+	// 2.5混合消息检测：wire 协议仅支持 纯文本/纯表情/文件 三种（对齐原项目）
+	//     文字+表情混输时无法编码成合法数据包，直接拒绝（不显示、不发送）
+	bool hasText = false;
+	bool hasImg = false;
+	for (int i = 0; i < msgList.size(); i++) {
+		if (msgList.at(i).at(0) == "text") {
+			hasText = true;
+		}
+		else if (msgList.at(i).at(0) == "img") {
+			hasImg = true;
+		}
+	}
+	if (hasText && hasImg) {
+		QMessageBox::warning(this, QStringLiteral("提示"),
+			QStringLiteral("仅支持发送纯文本或纯表情消息！"));
+		return;
+	}
+
+	//空消息守卫：解析结果为空（无文本无表情）时不显示空气泡、不发送
+	if (msgList.isEmpty()) {
+		return;
+	}
 
 	// 3.拼接 :  qsMsg (QString) = "你好<img src=\\"...\\" width=\\"24\\" height=\\"24\\"/>"
 	QString qsMsg;		//最终渲染用的完整 HTML
+	bool firstText = true;		//是否为第一段文本（用于多段文本间补 <br> 换行）
 	for (int i = 0; i < msgList.size(); i++)		//遍历链表，取出消息内容
 	{
 		//消息类型为表情 img
@@ -190,8 +252,20 @@ void MsgWebView::appendMsg(const QString& html, const QString strObj) {
 		//消息类型为文本 text
 		else if (msgList.at(i).at(0) == "text")
 		{
-			qsMsg += msgList.at(i).at(1);
-			msg = qsMsg;
+			//HTML 转义：用户输入的 < > & " 等转为实体，防止气泡页把它们当标签解析（错乱/注入）
+			//wire 传输的就是转义后文本，接收端直接嵌入模板即安全
+			QString text = msgList.at(i).at(1).toHtmlEscaped();
+
+			//多段文本（多行输入被解析为多段）之间补 <br>，保留换行显示
+			if (firstText) {
+				firstText = false;
+			}
+			else {
+				text.prepend("<br>");
+			}
+
+			qsMsg += text;
+			msg += text;
 		}
 	}
 
@@ -226,8 +300,9 @@ void MsgWebView::appendMsg(const QString& html, const QString strObj) {
 	{
 		// strObj == QQ号，为接收消息
 
-		// 追加数据，这里就是 recvHtml
-		this->page()->runJavaScript(QString("recvHtml_%1(%2)").arg(strObj).arg(Msg));
+		// 调用通用接收函数：objName 必须带 external_ 前缀，与 init() 注册的对象名对齐
+		// JS 侧从 channelObjects[objName] 取该发送者的左侧气泡模板（头像即发送者的）
+		this->page()->runJavaScript(QString("recvMsgHtml('external_%1',%2)").arg(strObj).arg(Msg));
 	}
 }
 
@@ -276,12 +351,9 @@ QList<QStringList> MsgWebView::parseDocNode(const QDomNode& node)
 			}
 			else if (element.tagName() == "span")
 			{
-				QStringList attributeList;
-				attributeList << "text" << element.text();
-				attribute << attributeList;
-
-				// span 可能含子节点（如 <span>你好<img.../></span>）
-				// 需递归解析子节点，提取 img 等嵌套元素
+				//注意：span 不能整体取 text()——text() 会拼接全部后代文本且丢失 <br> 换行结构，
+				//再叠加子节点递归就重复计数（多行消息显示两遍的根因）
+				//正确做法：只递归子节点，文本由文本节点分支逐段提取，段间换行由 appendMsg 统一重建
 				if (node.hasChildNodes())
 				{
 					attribute << parseDocNode(node);

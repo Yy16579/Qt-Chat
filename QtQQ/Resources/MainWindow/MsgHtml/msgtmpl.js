@@ -1,80 +1,34 @@
-var external0 = null;
-var external_10001 = null;
-var external_10002 = null;
-var external_10003 = null;
-var external_10004 = null;
-var external_10005 = null;
-var external_10006 = null;
-var external_10007 = null;
-var external_10008 = null;
-var external_10009 = null;
+//通用版消息模板脚本
+//不再为每个员工硬编码 external_<ID> 变量和 recvHtml_<ID> 函数
+//改为保存 channel.objects 对象表，通过名字动态取任意发送者的头像模板
+var channelObjects = null;
 
 
-
-String.prototype.format = function() {  
-    if(arguments.length == 0) return this;  
-    var obj = arguments[0];  
-    var s = this;  
-    for(var key in obj) {  
-        s = s.replace(new RegExp("\\{\\{" + key + "\\}\\}", "g"), obj[key]);  
-    }  
-    return s;  
-}  
+String.prototype.format = function() {
+	if(arguments.length == 0) return this;
+	var obj = arguments[0];
+	var s = this;
+	for(var key in obj) {
+		s = s.replace(new RegExp("\\{\\{" + key + "\\}\\}", "g"), obj[key]);
+	}
+	return s;
+}
 
 new QWebChannel(qt.webChannelTransport,
 	function(channel) {
-		external0 = channel.objects.external0;
-		external_10001 = channel.objects.external_10001;
-external_10002 = channel.objects.external_10002;
-external_10003 = channel.objects.external_10003;
-external_10004 = channel.objects.external_10004;
-external_10005 = channel.objects.external_10005;
-external_10006 = channel.objects.external_10006;
-external_10007 = channel.objects.external_10007;
-external_10008 = channel.objects.external_10008;
-external_10009 = channel.objects.external_10009;
-
+		//保存完整对象表：C++ 侧在 load 之前注册的所有对象都在此
+		channelObjects = channel.objects;
 	}
 );
 
+//显示自己发送的消息（右侧气泡，模板取 external0）
 function appendHtml0(msg){
-	$("#placeholder").append(external0.msgRHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
+	$("#placeholder").append(channelObjects.external0.msgRHtmlTmpl.format(msg));
+	window.scrollTo(0,document.body.scrollHeight);
 };
 
-function recvHtml_10001(msg){
-	$("#placeholder").append(external_10001.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10002(msg){
-	$("#placeholder").append(external_10002.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10003(msg){
-	$("#placeholder").append(external_10003.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10004(msg){
-	$("#placeholder").append(external_10004.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10005(msg){
-	$("#placeholder").append(external_10005.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10006(msg){
-	$("#placeholder").append(external_10006.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10007(msg){
-	$("#placeholder").append(external_10007.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10008(msg){
-	$("#placeholder").append(external_10008.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
-};
-function recvHtml_10009(msg){
-	$("#placeholder").append(external_10009.msgLHtmlTmpl.format(msg));
-	window.scrollTo(0,document.body.scrollHeight); ;  
+//显示收到的消息（左侧气泡，objName 形如 "external_10001"，头像取对应发送者的模板）
+function recvMsgHtml(objName, msg){
+	$("#placeholder").append(channelObjects[objName].msgLHtmlTmpl.format(msg));
+	window.scrollTo(0,document.body.scrollHeight);
 };

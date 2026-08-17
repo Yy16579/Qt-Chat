@@ -28,6 +28,7 @@ enum class PacketType : quint16 {
     RegisterRequest = 0x0203,   // 注册请求
     RegisterResponse= 0x0204,   // 注册响应
     Logout          = 0x0205,   // 注销
+    KickOut         = 0x0206,   // 踢下线通知
 
     // === 数据库类 (0x03xx) - 数据体为二进制格式 ===
     DbQuery         = 0x0301,   // 数据库查询请求

@@ -63,7 +63,7 @@ void RootContactItem::paintEvent(QPaintEvent* event) {
 	//开启图片平滑变换，让箭头旋转后不模糊
 	painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-	painter.save();			
+	painter.save();
 
 	if (this->m_hasArrow) {
 		QPixmap pixmap;
@@ -71,7 +71,7 @@ void RootContactItem::paintEvent(QPaintEvent* event) {
 		//创建与箭头图片同大小的临时透明画布
 		//用于绘制旋转后的箭头，避免直接旋转原图片导致的变形
 		QPixmap tmpPixmap(pixmap.size());
-		tmpPixmap.fill(Qt::transparent);				
+		tmpPixmap.fill(Qt::transparent);
 		QPainter p(&tmpPixmap);
 		p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 		//将坐标原点平移到图片中心
@@ -85,9 +85,11 @@ void RootContactItem::paintEvent(QPaintEvent* event) {
 		//将旋转后的箭头绘制到主控件上
 		//位置：x=6px（左对齐），y=(控件高度-箭头高度)/2（垂直居中）
 		painter.drawPixmap(6, (height() - pixmap.height())/2, tmpPixmap);
-		//恢复画家之前保存的状态
-		painter.restore();
 	}
+
+	//恢复画家之前保存的状态
+	//save/restore 必须无条件配对，否则绘制器带未恢复状态栈结束，触发 QPainter::end 警告
+	painter.restore();
 
 	QLabel::paintEvent(event);
 }

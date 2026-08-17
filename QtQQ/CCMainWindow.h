@@ -30,6 +30,8 @@ private:
 	void updateSearchStyle();		//更新/还原搜索栏样式
 	void addGroupItem(QTreeWidgetItem* pRootGroupItem, int depID);		//联系人树 添加群聊子项
 
+	void doLocalLogout();		//退出登录本地清理：关聊天窗壳、关主窗、重建登录窗
+
 private:
 	//事件重写
 	bool eventFilter(QObject* obj, QEvent* event);		//事件过滤器
@@ -46,6 +48,10 @@ private slots:
 	void onItemCollapsed(QTreeWidgetItem* item);
 	void onItemDoubleClicked(QTreeWidgetItem* item, int column);
 
+public slots:
+	void onLogoutTriggered();		//退出登录（托盘菜单触发）
+	void onKickedOut();				//被踢下线（收到 KickOut 包触发）
+	
 private:
 	//成员变量
 	int m_empID;		//当前登录用户的 employeeID

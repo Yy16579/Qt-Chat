@@ -29,12 +29,6 @@ public:
 private:
 	void initControl();
 
-	//--------------------------------------------------------------------------
-	void getEmployeeID(QStringList& employeesList);			//获取所有员工QQ号
-	bool creatJSFile(QStringList& employeeList);			//创建JS文件
-	void initJSFile();										//延迟初始化JS文件（生成 msgtmpl.js）
-	//--------------------------------------------------------------------------
-
 public slots:
 	//槽函数
 	void onEmotionBtnClicked(bool);

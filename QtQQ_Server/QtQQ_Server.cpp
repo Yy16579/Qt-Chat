@@ -14,28 +14,12 @@ QtQQ_Server::QtQQ_Server(QWidget *parent)
 {
 	ui.setupUi(this);
 
-	this->initTcpServer();		//初始化监听 socket 
 	this->initDatabase();		//连接 Mysql 数据库
+	this->initTcpServer();		//初始化监听 socket 
 }
 
 QtQQ_Server::~QtQQ_Server()
 {}
-
-void QtQQ_Server::initTcpServer() {
-	//从配置文件 config.ini 读取端口号（默认 6666）
-	QString configPath = QCoreApplication::applicationDirPath() + "/config.ini";
-	QSettings settings(configPath, QSettings::IniFormat);
-	int port = settings.value("Tcp/port", 6666).toInt();
-
-	//创建监听 socket 并开始监听
-	//对应 socket API  --------  socket();	  
-	//对应 socket API  --------  bind();	  
-	this->m_tcpServer = new TcpServer(port);
-	//对应 socket API  --------  listen();	
-	if (this->m_tcpServer->startListen() == false) {
-		qDebug() << QStringLiteral("服务端启动失败，请检查端口是否被占用") << '\n';
-	}
-}
 
 void QtQQ_Server::initDatabase() {
 	//从 config.ini 配置文件的 [Database] 节读取连接参数
@@ -54,9 +38,26 @@ void QtQQ_Server::initDatabase() {
 
 	if (db.open()) {
 		qDebug() << QStringLiteral("数据库连接成功：%1:%2/%3")
-					.arg(db.hostName()).arg(db.port()).arg(db.databaseName());
+			.arg(db.hostName()).arg(db.port()).arg(db.databaseName());
 	}
 	else {
 		qDebug() << QStringLiteral("数据库连接失败：%1").arg(db.lastError().text());
 	}
 }
+
+void QtQQ_Server::initTcpServer() {
+	//从配置文件 config.ini 读取端口号（默认 6666）
+	QString configPath = QCoreApplication::applicationDirPath() + "/config.ini";
+	QSettings settings(configPath, QSettings::IniFormat);
+	int port = settings.value("Tcp/port", 6666).toInt();
+
+	//创建监听 socket 并开始监听
+	//对应 socket API  --------  socket();	  
+	//对应 socket API  --------  bind();	  
+	this->m_tcpServer = new TcpServer(port);
+	//对应 socket API  --------  listen();	
+	if (this->m_tcpServer->startListen() == false) {
+		qDebug() << QStringLiteral("服务端启动失败，请检查端口是否被占用") << '\n';
+	}
+}
+

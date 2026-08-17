@@ -1,8 +1,9 @@
 #include "SysTray.h"
 #include "CustomMenu.h"
+#include "CCMainWindow.h"
 
 
-SysTray::SysTray(BasicWindow* parent)
+SysTray::SysTray(CCMainWindow* parent)
 	: m_parent(parent)
 	, QSystemTrayIcon(parent)
 {
@@ -27,13 +28,17 @@ void SysTray::addSysTrayMenu() {	//临时菜单模式：每次右键都重新创
 	customMenu->addCustomMenu("onShow",
 							  ":/Resources/MainWindow/app/logo.ico",
 							  QStringLiteral("显示"));
+	customMenu->addCustomMenu("onLogout",
+							  ":/Resources/MainWindow/qqlogoclassic.png",
+							  QStringLiteral("退出登录"));
 	customMenu->addCustomMenu("onQuit",
 							  ":/Resources/MainWindow/app/page_close_btn_hover.png",
 							  QStringLiteral("退出"));
 
 	//连接菜单项信号槽
-	connect(customMenu->getAction("onShow"), &QAction::triggered, this->m_parent, &BasicWindow::onShowNormal);
-	connect(customMenu->getAction("onQuit"), &QAction::triggered, this->m_parent, &BasicWindow::onShowQuit);
+	connect(customMenu->getAction("onShow"), &QAction::triggered, this->m_parent, &CCMainWindow::onShowNormal);
+	connect(customMenu->getAction("onQuit"), &QAction::triggered, this->m_parent, &CCMainWindow::onShowQuit);
+	connect(customMenu->getAction("onLogout"), &QAction::triggered, this->m_parent, &CCMainWindow::onLogoutTriggered);
 
 	//exec 模态阻塞调用，会启动一个局部事件循环，直到用户关闭菜单
 	//QCursor::pos()：获取鼠标当前的全局屏幕坐标，让菜单正好在用户右键点击的位置弹出

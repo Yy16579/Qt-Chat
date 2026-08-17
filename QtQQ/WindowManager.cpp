@@ -105,3 +105,6 @@ void WindowManager::addNewTalkWindow(const int& uid) {
 	this->m_talkwindowshell->activateWindow();
 }
 
+TalkWindowShell* WindowManager::getTalkWindowShell() const {
+	return m_talkwindowshell; 
+};

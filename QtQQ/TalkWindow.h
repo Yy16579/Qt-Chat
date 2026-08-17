@@ -26,9 +26,10 @@ private:
 	void initPTOPTalk();		//初始化单聊
 	void addPeopleItem(QTreeWidgetItem* pRootGroupItem, int empID);		//联系人树 添加联系人子项
 
-public slots:
+private slots:
 	//槽函数
 	void onMsgSend(const QString& msg, int msgType, const QString file);
+	void onMsgReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
 
 private slots:
 	void onSendBtnClicked();

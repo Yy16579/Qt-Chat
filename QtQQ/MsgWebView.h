@@ -71,6 +71,12 @@ public:
 	~MsgWebView();
 
 public:
+	//初始化：注册消息发送者的头像模板对象（单聊注册对方，群聊注册全部群成员）
+	//由 TalkWindow 在构造后调用；内部最后才 load 页面
+	//（QWebChannel 在页面加载时一次性快照对象表，所有注册必须在 load 之前完成）
+	void init(int talkUid, bool isGroupTalk);
+
+public:
 	void appendMsg(const QString& html, const QString strObj = "0");	//发送消息(strObj="0")或接收消息(strObj=QQ号)
 
 private:

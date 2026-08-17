@@ -50,6 +50,14 @@ void QMsgTextEdit::deleteAllEmotionImage() {
 
 	//清除所有映射
 	this->m_emotionMap.clear();
+
+	//同步清空表情路径列表
+	//若残留，下次插入同一表情时 contains 误判为"已插入"，不会再创建 QMovie（编辑框内表情失去动画刷新）
+	this->m_listEmotionUrl.clear();
+}
+
+bool QMsgTextEdit::hasEmotionImage() const {
+	return !this->m_listEmotionUrl.isEmpty();
 }
 
 

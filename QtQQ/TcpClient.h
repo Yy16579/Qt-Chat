@@ -27,6 +27,9 @@ public:
 	// 发送登录请求
 	void sendLoginRequest(const QString& account, const QString& password);
 
+	// 发送注销请求并断开连接
+	void sendLogout();
+
 	// 发送注册请求
 	void sendRegisterRequest(const QString& account, const QString& password, const QString& name);
 
@@ -60,7 +63,7 @@ signals:
 	// 数据包业务分发信号 ======================================================================================
 	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
 	void signalLoginResponse(bool result, int empID);
-	
+	void signalKickedOut();
 	// =================================================================================================================
 
 private slots:

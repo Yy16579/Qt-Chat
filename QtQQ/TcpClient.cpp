@@ -22,11 +22,23 @@ TcpClient& TcpClient::getInstance() {
 }
 
 void TcpClient::connectToServer() {
-	// socket 已存在且已连接，直接返回
+	// socket 状态检查，避免重复发起连接
 	//避免 TalkWindowShell 重复构造时多次调用 connectToHost 报错
-	if (this->m_tcpClientSocket != nullptr &&
-		this->m_tcpClientSocket->state() != QAbstractSocket::UnconnectedState) {
-		return;
+	if (this->m_tcpClientSocket != nullptr) {
+		QAbstractSocket::SocketState state = this->m_tcpClientSocket->state();
+
+		//已连接或正在连接：直接返回，不重复发起
+		if (state == QAbstractSocket::ConnectedState ||
+			state == QAbstractSocket::ConnectingState) {
+			return;
+		}
+
+		//残留的非连接态（如退出登录后的 ClosingState、DNS 解析中的 HostLookupState）：
+		//Qt 规定这些状态下调用 connectToHost 会报 OperationError
+		//"Trying to connect while connection is in progress" 并拒绝连接，
+		//必须先 abort() 立即复位到 UnconnectedState 再重连
+		//（进入 ClosingState 前写缓冲已清空，Logout 包早已发出，abort 不丢数据）
+		this->m_tcpClientSocket->abort();
 	}
 
 	//从 config.ini 配置文件读取服务端地址和端口
@@ -63,6 +75,11 @@ void TcpClient::connectToServer() {
 
 		//监听 socket  readyRead 信号
 		connect(this->m_tcpClientSocket, &QTcpSocket::readyRead, this, &TcpClient::onReadyRead);
+
+		//监听 socket  disconnected 信号
+		connect(this->m_tcpClientSocket, &QTcpSocket::disconnected, this, [this]() {
+			this->m_buffer.clear();
+		});
 	}
 
 	//向服务端发起连接
@@ -156,6 +173,22 @@ void TcpClient::sendLoginRequest(const QString& account, const QString& password
 
 	//组装外层二进制头并发送（包类型=LoginRequest）
 	this->sendPacket(static_cast<quint16>(PacketType::LoginRequest), strSend.toUtf8());
+}
+
+void TcpClient::sendLogout() {
+	//用户主动退出登录：通知服务端解绑并断开连接
+
+	//先检查 socket 状态
+	if (!this->m_tcpClientSocket || this->m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
+		return;
+	}
+
+	//发送注销包（告知服务端主动解绑，无需响应）
+	this->sendPacket(static_cast<quint16>(PacketType::Logout), QByteArray());
+
+	//主动断开连接（会话终结）
+	//   disconnectFromHost 会先 flush 发送缓冲再断开，Logout 包不会丢
+	this->m_tcpClientSocket->disconnectFromHost();
 }
 
 void TcpClient::sendRegisterRequest(const QString& account, const QString& password, const QString& name) {
@@ -291,6 +324,15 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 		//解析完成，发射信号交给 UI 层（UserLogin）处理界面跳转
 		emit this->signalLoginResponse(result, empID);
 	}
+	else if (packetType == static_cast<quint16>(PacketType::KickOut)) {
+		// ===== 踢下线通知包 =====
+		// 重复登录时服务端先发此包通知旧客户端，随后才断开连接
+		// 收到即触发被踢信号，由 UI 层弹提示并切回登录窗（此时连接即将断开，不再发包）
+		qDebug() << QStringLiteral("[KickOut] 收到踢下线通知");
+
+		//发射信号交给 UI 层（CCMainWindow）处理
+		emit this->signalKickedOut();
+	}
 	// ================================================================================================================
 }
 
@@ -313,7 +355,7 @@ void TcpClient::onReadyRead() {
 
 		if (magic != PACKET_MAGIC) {
 			//魔数错误：数据错位或非法数据
-			//进阶处理：在缓冲区中查找下一个魔数位置，丢弃错误数据，重新对齐数据流
+			//在缓冲区中查找下一个魔数位置，丢弃错误数据，重新对齐数据流
 			static const QByteArray magicBytes = QByteArray::fromRawData("\x5A\x5A", 2);
 			int nextMagicPos = this->m_buffer.indexOf(magicBytes, 1);
 

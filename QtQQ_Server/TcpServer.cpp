@@ -62,6 +62,7 @@ void TcpServer::registerHandlers() {
 	this->m_handlers.insert(PacketType::RegisterRequest, &TcpServer::handleRegisterRequest);
 	this->m_handlers.insert(PacketType::DbQuery, &TcpServer::handleDbQuery);
 	this->m_handlers.insert(PacketType::Heartbeat, &TcpServer::handleHeartbeat);
+	this->m_handlers.insert(PacketType::Logout, &TcpServer::handleLogout);
 }
 
 void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
@@ -160,7 +161,7 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 		}
 	}
 
-	// 3. 打包回发登录响应
+	// 3. 回发登录响应包
 	//格式：成功 = 结果标志1B + uid5B（客户端按 mid(1,5) 定长解析，uid 不足5位需补零）；失败 = "0"
 	QString data;
 	if (result == "1") {
@@ -180,12 +181,20 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 		
 		if (this->m_uidSocketMap.contains(uid) == true) {
 			// 路由表中存在登录记录
-			// 重复登录：断开旧连接（触发 onClientDisconnected 清理）
+			// 重复登录：发送 KickOut 包再断开连接
 			TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
-			
+
 			if (oldSocket == socket) {
 				return;
-			}	
+			}
+
+			//1. 发送 KickOut 包：旧客户端收到 KickOut 包后退出登录
+			this->sendPacket(static_cast<quint16>(PacketType::KickOut), QByteArray(), oldSocket);
+
+			//2. 立即冲刷发送缓冲，确保 KickOut 包先于断开动作发出，不被丢弃
+			oldSocket->flush();
+
+			//3. 断开旧连接（异步，稍后由 onClientDisconnected 完成清理）
 			oldSocket->disconnectFromHost();
 		}
 
@@ -198,6 +207,27 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 		socket->setUid(uid);				//设置 socket 的 uid 字段
 		this->m_uidSocketMap.insert(uid, socket);	//添加至路由表
 	}
+}
+
+void TcpServer::handleLogout(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
+	// 收到注销包：解绑该连接的用户路由映射
+
+	// 1. 取出通信 socket，校验连接有效且已登录
+	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
+	if (socket == nullptr || socket->getUid() == -1) {
+		return;		//连接不存在或本就未登录，无需解绑
+	}
+
+	// 2. 从路由表移除（校验映射仍指向本连接，防止误删新登录建立的映射）
+	int uid = socket->getUid();
+	if (this->m_uidSocketMap.value(uid) == socket) {
+		this->m_uidSocketMap.remove(uid);
+	}
+
+	// 3. 重置 uid，后续 onClientDisconnected 不再重复清理
+	socket->setUid(-1);
+
+	qDebug() << QStringLiteral("[Logout] fd=%1 uid=%2 已解绑路由").arg(descriptor).arg(uid);
 }
 
 void TcpServer::handleRegisterRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
@@ -213,6 +243,13 @@ void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& 
 }
 
 void TcpServer::sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target) {
+	//目标 socket 判空防御：连接可能已断开被移出映射表，避免空指针崩溃
+	if (target == nullptr) {
+		qDebug() << QStringLiteral("[sendPacket] 目标 socket 为空，丢弃 type=0x%1 的包")
+			.arg(packetType, 4, 16, QChar('0'));
+		return;
+	}
+
 	//拼接包头
 	QByteArray packet;
 	//1. 魔数（大端）

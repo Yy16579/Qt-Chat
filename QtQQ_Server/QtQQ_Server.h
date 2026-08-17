@@ -15,8 +15,8 @@ public:
 	~QtQQ_Server();
 
 private:
-	void initTcpServer();			//初始化 Tcp 监听 socket
 	void initDatabase();			//初始化数据库连接
+	void initTcpServer();			//初始化 Tcp 监听 socket
 
 private:
 	//成员变量

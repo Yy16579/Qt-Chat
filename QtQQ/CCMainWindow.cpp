@@ -5,6 +5,8 @@
 #include "RootContactItem.h"
 #include "ContactItem.h"
 #include "WindowManager.h"
+#include "TcpClient.h"
+#include "UserLogin.h"
 
 #include <QProxyStyle>
 #include <QPainter>
@@ -13,6 +15,7 @@
 #include <QApplication>
 #include <QSqlQuery>
 #include <QSqlError>
+#include <QMessageBox>
 
 
 
@@ -65,6 +68,8 @@ void CCMainWindow::initControl() {
     connect(&NotifyManager::getInstance(), &NotifyManager::signalSkinChanged, this, [this]() {
         this->updateSearchStyle();
         });
+    connect(&TcpClient::getInstance(), &TcpClient::signalKickedOut,
+        this, &CCMainWindow::onKickedOut);
 
     //添加应用控件
     QHBoxLayout* appupLayout = new QHBoxLayout;     //创建水平布局
@@ -165,6 +170,22 @@ void CCMainWindow::addGroupItem(QTreeWidgetItem* pRootGroupItem, int depID) {
     //将子项添加到根项上
     pRootGroupItem->addChild(pChild);
     ui.treeWidget->setItemWidget(pChild, 0, pContactItem);
+}
+
+void CCMainWindow::doLocalLogout() {
+    //退出登录本地清理
+
+    //1. 关闭聊天窗口壳（内部所有聊天窗口随之销毁，WindowManager::destroyed 置空指针）
+    if (WindowManager::getInstance().getTalkWindowShell()) {
+        WindowManager::getInstance().getTalkWindowShell()->close();
+    }
+
+    //2. 关闭主窗
+    this->close();
+
+    //3. 重建登录窗
+    UserLogin* userLogin = new UserLogin;
+    userLogin->show();
 }
 
 void CCMainWindow::setUserName(const QString& username) {
@@ -400,4 +421,17 @@ void CCMainWindow::onItemDoubleClicked(QTreeWidgetItem* item, int column) {
     }
 }
 
+void CCMainWindow::onLogoutTriggered() {
+    // 向服务端发送注销请求
+    TcpClient::getInstance().sendLogout();
+
+    this->doLocalLogout();
+}
+
+void CCMainWindow::onKickedOut() {
+    QMessageBox::information(this, QStringLiteral("提示"),
+        QStringLiteral("您的账号已在其他设备登录，您已被迫下线！"));
+
+    this->doLocalLogout();
+}
 

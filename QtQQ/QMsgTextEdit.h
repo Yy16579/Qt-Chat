@@ -18,6 +18,8 @@ public:
 	void addEmotionUrl(int emotionNum);		// 消息编辑框 插入一个表情
 	void deleteAllEmotionImage();			// 清空所有表情资源
 
+	bool hasEmotionImage() const;			// 编辑框内是否插有表情（供发送判空：纯表情消息无纯文本）
+
 private slots:
 	//槽函数
 	void onEmotionImageFrameChange(int frame);		// 表情动画每播一帧时触发

@@ -31,6 +31,7 @@ private:
 	//           descriptor = 来源客户端的 fd 标识
 	void handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 消息包：私聊/群聊转发
 	void handleLoginRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);		// 登录请求：绑定uid，建立路由映射
+	void handleLogout(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 注销请求：解绑用户路由映射
 	void handleRegisterRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);	// 注册请求
 	void handleDbQuery(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 数据库查询请求
 	void handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 心跳包：保活
@@ -51,6 +52,7 @@ private:
 
 	QHash<int, TcpSocket*> m_fdSocketMap;		// 连接表：fd → socket（用于连接管理、广播、断开清理）
 	QHash<int, TcpSocket*> m_uidSocketMap;		// 路由表：uid → socket（用于精准转发）（客户端成功登录时添加）
+
 	QHash<PacketType, void (TcpServer::*)(const QByteArray&, const QByteArray&, int)> m_handlers;		// 业务表
 };
 

@@ -6,8 +6,6 @@
 #include "TcpClient.h"
 
 #include <QToolTip>
-#include <QFile>
-#include <QMessageBox>
 #include <QSqlQuery>
 
 
@@ -57,9 +55,12 @@ void TalkWindow::initControl() {
 	connect(ui.sendBtn, &QPushButton::clicked, this, &TalkWindow::onSendBtnClicked);
 	connect(ui.treeWidget, &QTreeWidget::itemDoubleClicked, this, &TalkWindow::onItemDoubleClicked);
 
-	//消息发送链路：MsgWebView 信号 → TalkWindow 转发 → TcpClient 发送
-	connect(ui.msgWidget, &MsgWebView::signalSendMsg, this, &TalkWindow::onMsgSend);
-	
+	connect(ui.msgWidget, &MsgWebView::signalSendMsg, this, &TalkWindow::onMsgSend);	//消息发送
+	connect(&TcpClient::getInstance(), &TcpClient::signalMessageReceived, this, &TalkWindow::onMsgReceived);	//消息接收
+
+	//初始化消息显示控件：注册头像模板对象并加载页面（必须在收发消息之前完成）
+	ui.msgWidget->init(this->m_talkId, this->m_isGroupTalk);
+
 	//初始化 treeWidget 控件
 	if (this->m_isGroupTalk == true) {
 		//为群聊
@@ -208,51 +209,78 @@ void TalkWindow::onMsgSend(const QString& msg, int msgType, const QString file) 
 	TcpClient::getInstance().sendMessage(this->m_isGroupTalk, sendID, this->m_talkId, msgType, msg, file);
 }
 
+void TalkWindow::onMsgReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg) {
+	//消息接收：路由匹配 + wire→html 逆向转换 + 显示
+
+	// 1.路由匹配：每个 TalkWindow 只处理属于自己的消息，其余忽略
+	int myEmpID = WindowManager::getInstance().m_empID;
+	if (groupFlag == 0) {
+		//私聊：sendId 为对方、recvId 必须是我（过滤"对方发给别人"的消息）
+		if (sendId != this->m_talkId || recvId != myEmpID) {
+			return;
+		}
+	}
+	else {
+		//群聊：recvId 为群ID，排除自己发的消息
+		//（服务端群聊转发暂未实现，此处为预留的完整判断逻辑）
+		if (recvId != this->m_talkId || sendId == myEmpID) {
+			return;
+		}
+	}
+
+	// 2.wire → html 逆向转换（发送侧 appendMsg 拼包的镜像操作）
+	QString html;
+	if (msgType == 1) {
+		//文本：wire = 5位长度前缀 + 文本内容，去掉前缀后直接包 html 骨架
+		//（文本样式由气泡页 ui.css 决定，无需套字体模板）
+		if (msg.size() <= 5) {
+			return;
+		}
+		html = "<html><body>" + msg.mid(5) + "</body></html>";
+	}
+	else if (msgType == 0) {
+		//表情：wire = 表情个数 + "images" + 每个3位编号，还原为 img 标签
+		int idx = msg.indexOf("images");
+		if (idx < 0) {
+			return;
+		}
+		int count = msg.left(idx).toInt();
+		QString nums = msg.mid(idx + QString("images").size());
+		html = "<html><body>";
+		for (int i = 0; i < count; i++) {
+			int eNum = nums.mid(i * 3, 3).toInt();		//按3位宽度切出表情编号
+			QPixmap pix(QString(":/Resources/MainWindow/emotion/%1.png").arg(eNum));
+			html += QString("<img src=\"qrc:/Resources/MainWindow/emotion/%1.png\" width=\"%2\" height=\"%3\"/>")
+				.arg(eNum).arg(pix.width()).arg(pix.height());
+		}
+		html += "</body></html>";
+	}
+	else {
+		//文件消息（msgType==2）：暂不支持接收显示（TODO，对齐原项目）
+		return;
+	}
+
+	// 3.显示：按发送者ID渲染左侧气泡（头像取 external_<sendId> 模板）
+	ui.msgWidget->appendMsg(html, QString::number(sendId));
+}
+
 void TalkWindow::onSendBtnClicked() {
-	// 若消息编辑窗口为空，直接返回
-	if (ui.textEdit->toPlainText().isEmpty()) {
+	// 若消息编辑窗口既无文本也无表情，直接返回
+	//注意：表情以 <img> 插入，toPlainText() 不包含图片，纯表情消息需靠 hasEmotionImage() 放行
+	if (ui.textEdit->toPlainText().isEmpty() && !ui.textEdit->hasEmotionImage()) {
 		QToolTip::showText(this->mapToGlobal(QPoint(630, 660)), QStringLiteral("发送的信息不能为空！"), this, QRect(0, 0, 120, 100), 2000);
 		return;
 	}
 
 	// 消息编辑窗口不为空，将对话框消息转换为 html 格式
-	QString html = ui.textEdit->document()->toHtml();	
-
-
-	// 文本html，如果没有字体，则添加字体
-	if (!html.contains(".png") && !html.contains("</span>"))
-	{
-		QString fontHtml;
-		QString text = ui.textEdit->toPlainText();
-		QFile file(":/Resources/MainWindow/MsgHtml/msgFont.txt");
-		if (file.open(QIODevice::ReadOnly))
-		{
-			fontHtml = file.readAll();
-			// 将html文件里的 %1，用字符串 text 替换
-			fontHtml.replace("%1", text);
-			file.close();
-		}
-		else
-		{
-			// this，当前聊天部件，作为父窗体
-			QMessageBox::information(this, QStringLiteral("提示"),
-				QStringLiteral("文件 msgFont.txt 不存在！"));
-			return;
-		}
-
-		// 判断转换后，有没有包含 fontHtml
-		if (!html.contains(fontHtml))
-		{
-			html.replace(text, fontHtml);
-		}
-	}
+	QString html = ui.textEdit->document()->toHtml();
 
 	// 清除消息编辑窗口的所有消息
-	ui.textEdit->clear();			
+	ui.textEdit->clear();
 	ui.textEdit->deleteAllEmotionImage();
 
-	// 将 html 消息添加至 MsgWebView 网页 
-	ui.msgWidget->appendMsg(html);		
+	// 将 html 消息添加至 MsgWebView 网页
+	ui.msgWidget->appendMsg(html);
 }
 
 void TalkWindow::onItemDoubleClicked(QTreeWidgetItem* item, int column) {
