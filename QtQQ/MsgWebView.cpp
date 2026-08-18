@@ -296,6 +296,12 @@ void MsgWebView::appendMsg(const QString& html, const QString strObj) {
 		// 发送信号，发送信息
 		emit this->signalSendMsg(msg, msgType);
 	}
+	else if (strObj == "-1")
+	{
+		// strObj == "-1"，为纯显示模式（重放自己发过的历史消息）
+		//只显示右侧气泡，不 emit 发送信号（否则历史消息会被重新发到网络）
+		this->page()->runJavaScript(QString("appendHtml0(%1)").arg(Msg));
+	}
 	else
 	{
 		// strObj == QQ号，为接收消息

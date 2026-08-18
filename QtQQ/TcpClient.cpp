@@ -123,8 +123,12 @@ void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 
 	//数据包字段
 	QString strGroupFlag = groupFlag ? "1" : "0";	//群聊标志，0私聊 1群聊
-	QString strSendID = QString::number(sendID);	//发送方 ID
-	QString strRecvID = QString::number(recvID);	//接收方 ID
+	//ID 按协议定宽补零（右对齐左补零），与收发两端的定长切分对齐
+	//不补零属隐式依赖数据库 ID 位数（员工5位/群4位），ID 位数变化即解析错位
+	QString strSendID = QString::number(sendID).rightJustified(5, '0');		//发送方 ID（5位）
+	//接收方 ID：私聊为员工ID（5位），群聊为群ID（4位）
+	QString strRecvID = groupFlag ? QString::number(recvID).rightJustified(4, '0')
+		: QString::number(recvID).rightJustified(5, '0');
 	QString strDataType;		//消息类型
 	QString strData;			//消息数据
 	
@@ -137,8 +141,11 @@ void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 		strDataType = QString::number(1);
 
 		//数据长度（UTF-8 字节数），始终为5位宽，不足补零
+		//注意上限：外层包头长度字段为 quint16（最大 65535），数据体超限会被
+		//static_cast<quint16> 静默截断，导致接收端切包错位、数据流错乱
+		//预留内层地址头+类型+前缀的开销，文本上限取 60000
 		int dataLength = msg.toUtf8().size();
-		if (dataLength > 99999) {
+		if (dataLength > 60000) {
 			emit signalErrorOccurred(QStringLiteral("消息过长"));
 			return;
 		}

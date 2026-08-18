@@ -6,6 +6,7 @@
 #include "ContactItem.h"
 #include "WindowManager.h"
 #include "TcpClient.h"
+#include "TalkSessionStore.h"
 #include "UserLogin.h"
 
 #include <QProxyStyle>
@@ -173,17 +174,20 @@ void CCMainWindow::addGroupItem(QTreeWidgetItem* pRootGroupItem, int depID) {
 }
 
 void CCMainWindow::doLocalLogout() {
-    //退出登录本地清理
+    //退出登录本地清理（用户主动退出与被踢下线共用）
 
-    //1. 关闭聊天窗口壳（内部所有聊天窗口随之销毁，WindowManager::destroyed 置空指针）
+    //1. 清空会话仓库
+    TalkSessionStore::getInstance().clear();
+
+    //2. 关闭聊天窗口壳（内部所有聊天窗口随之销毁，WindowManager::destroyed 置空指针）
     if (WindowManager::getInstance().getTalkWindowShell()) {
         WindowManager::getInstance().getTalkWindowShell()->close();
     }
 
-    //2. 关闭主窗
+    //3. 关闭主窗
     this->close();
 
-    //3. 重建登录窗
+    //4. 重建登录窗
     UserLogin* userLogin = new UserLogin;
     userLogin->show();
 }

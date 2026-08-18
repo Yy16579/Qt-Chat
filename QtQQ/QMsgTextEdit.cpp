@@ -13,15 +13,14 @@ QMsgTextEdit::~QMsgTextEdit()
 
 void QMsgTextEdit::addEmotionUrl(int emotionNum) {
 	// 1 :  拼出表情图片的资源路径  ( emotionNum 是表情编号（比如 23），路径变成 qrc:/Resources/MainWindow/emotion/23.png )
-	const QString& imageName = QString("qrc:/Resources/MainWindow/emotion/%1.png").arg(emotionNum);
-	const QString& flagName = QString("%1").arg(imageName);
-	
+	const QString imageName = QString("qrc:/Resources/MainWindow/emotion/%1.png").arg(emotionNum);
+
 	// 2 :  把 <img> 标签插入到消息编辑框中（光标当前位置），这样消息编辑框里就会出现表情图片
-	this->insertHtml(QString("<img src = '%1' />").arg(flagName));
-	
+	this->insertHtml(QString("<img src = '%1' />").arg(imageName));
+
 	// 3 :  将表情插入到 QList 中
 	if (this->m_listEmotionUrl.contains(imageName)) {
-		return;			// 如果之前插入过这个表情，直接返回，不再创建新的 QMovie
+		return;			// 如果之前插入过这个表情，直接返回，不再创建新的 QMovie（同一表情动画共享）
 	}
 	else {
 		this->m_listEmotionUrl.append(imageName);
@@ -31,7 +30,7 @@ void QMsgTextEdit::addEmotionUrl(int emotionNum) {
 	QMovie* apngMovie = new QMovie(imageName, "apng", this);
 
 	// 5 :  添加 QMovie - 资源URL 的映射，后面更新帧时要用
-	this->m_emotionMap.insert(apngMovie, flagName);
+	this->m_emotionMap.insert(apngMovie, imageName);
 	
 	// 6 :  连接信号槽，动画每播一帧，就执行 onEmotionImageFrameChange 槽函数
 	connect(apngMovie, &QMovie::frameChanged, this, &QMsgTextEdit::onEmotionImageFrameChange);

@@ -55,8 +55,13 @@ void TalkWindow::initControl() {
 	connect(ui.sendBtn, &QPushButton::clicked, this, &TalkWindow::onSendBtnClicked);
 	connect(ui.treeWidget, &QTreeWidget::itemDoubleClicked, this, &TalkWindow::onItemDoubleClicked);
 
-	connect(ui.msgWidget, &MsgWebView::signalSendMsg, this, &TalkWindow::onMsgSend);	//消息发送
-	connect(&TcpClient::getInstance(), &TcpClient::signalMessageReceived, this, &TalkWindow::onMsgReceived);	//消息接收
+	//消息发送与接收
+	connect(ui.msgWidget, &MsgWebView::signalSendMsg, this, &TalkWindow::onMsgSend);	
+	connect(&TalkSessionStore::getInstance(), &TalkSessionStore::signalMessageStored, this, &TalkWindow::onStoredMessage);	
+
+	//页面加载完成才开始历史重放（QWebEngine 异步加载，load 前调 runJavaScript 会静默丢失）
+	connect(ui.msgWidget, &QWebEngineView::loadFinished, this, &TalkWindow::onPageLoadFinished);
+
 
 	//初始化消息显示控件：注册头像模板对象并加载页面（必须在收发消息之前完成）
 	ui.msgWidget->init(this->m_talkId, this->m_isGroupTalk);
@@ -201,51 +206,26 @@ void TalkWindow::addPeopleItem(QTreeWidgetItem* pRootGroupItem, int empID) {
 	ui.treeWidget->setItemWidget(pChild, 0, pContactItem);
 }	
 
+void TalkWindow::renderRecord(const MsgRecord& record) {
+	//按一条记录渲染气泡（增量显示与历史重放共用，保证两处渲染一致）
+	//wire → html 逆向转换（发送侧 appendMsg 拼包的镜像操作）
 
-//槽函数
-void TalkWindow::onMsgSend(const QString& msg, int msgType, const QString file) {
-	//通过 TcpClient 单例向服务端发送消息数据
-	int sendID = WindowManager::getInstance().m_empID;
-	TcpClient::getInstance().sendMessage(this->m_isGroupTalk, sendID, this->m_talkId, msgType, msg, file);
-}
-
-void TalkWindow::onMsgReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg) {
-	//消息接收：路由匹配 + wire→html 逆向转换 + 显示
-
-	// 1.路由匹配：每个 TalkWindow 只处理属于自己的消息，其余忽略
-	int myEmpID = WindowManager::getInstance().m_empID;
-	if (groupFlag == 0) {
-		//私聊：sendId 为对方、recvId 必须是我（过滤"对方发给别人"的消息）
-		if (sendId != this->m_talkId || recvId != myEmpID) {
-			return;
-		}
-	}
-	else {
-		//群聊：recvId 为群ID，排除自己发的消息
-		//（服务端群聊转发暂未实现，此处为预留的完整判断逻辑）
-		if (recvId != this->m_talkId || sendId == myEmpID) {
-			return;
-		}
-	}
-
-	// 2.wire → html 逆向转换（发送侧 appendMsg 拼包的镜像操作）
 	QString html;
-	if (msgType == 1) {
+	if (record.msgType == 1) {
 		//文本：wire = 5位长度前缀 + 文本内容，去掉前缀后直接包 html 骨架
-		//（文本样式由气泡页 ui.css 决定，无需套字体模板）
-		if (msg.size() <= 5) {
+		if (record.msg.size() <= 5) {
 			return;
 		}
-		html = "<html><body>" + msg.mid(5) + "</body></html>";
+		html = "<html><body>" + record.msg.mid(5) + "</body></html>";
 	}
-	else if (msgType == 0) {
+	else if (record.msgType == 0) {
 		//表情：wire = 表情个数 + "images" + 每个3位编号，还原为 img 标签
-		int idx = msg.indexOf("images");
+		int idx = record.msg.indexOf("images");
 		if (idx < 0) {
 			return;
 		}
-		int count = msg.left(idx).toInt();
-		QString nums = msg.mid(idx + QString("images").size());
+		int count = record.msg.left(idx).toInt();
+		QString nums = record.msg.mid(idx + QString("images").size());
 		html = "<html><body>";
 		for (int i = 0; i < count; i++) {
 			int eNum = nums.mid(i * 3, 3).toInt();		//按3位宽度切出表情编号
@@ -256,12 +236,78 @@ void TalkWindow::onMsgReceived(int groupFlag, int sendId, int recvId, int msgTyp
 		html += "</body></html>";
 	}
 	else {
-		//文件消息（msgType==2）：暂不支持接收显示（TODO，对齐原项目）
+		//文件消息（msgType==2）：暂不支持显示（TODO，对齐原项目）
 		return;
 	}
 
-	// 3.显示：按发送者ID渲染左侧气泡（头像取 external_<sendId> 模板）
-	ui.msgWidget->appendMsg(html, QString::number(sendId));
+	//渲染：mine=右侧气泡（"-1"纯显示模式，不 emit 发送信号）；对方=左侧气泡（按 sendId 定头像）
+	if (record.mine) {
+		ui.msgWidget->appendMsg(html, "-1");
+	}
+	else {
+		ui.msgWidget->appendMsg(html, QString::number(record.sendId));
+	}
+}
+
+void TalkWindow::replayHistory() {
+	//重放会话仓库中本会话的全部历史（窗口刚创建/重开时）
+	QList<MsgRecord> history = TalkSessionStore::getInstance().records(this->m_talkId);
+	for (int i = 0; i < history.size(); i++) {
+		this->renderRecord(history.at(i));
+	}
+}
+
+
+//槽函数
+void TalkWindow::onMsgSend(const QString& msg, int msgType, const QString file) {
+	//通过 TcpClient 单例向服务端发送消息数据
+	int sendID = WindowManager::getInstance().m_empID;
+	TcpClient::getInstance().sendMessage(this->m_isGroupTalk, sendID, this->m_talkId, msgType, msg, file);
+
+	//自己发的消息同步入会话仓库（静默入库不广播，窗口已即时显示右侧气泡）
+	//否则重开窗口时历史里缺自己说过的话
+	MsgRecord record;
+	record.groupFlag = this->m_isGroupTalk ? 1 : 0;
+	record.sendId = sendID;
+	record.recvId = this->m_talkId;
+	record.msgType = msgType;
+
+	//入库格式必须与网络 wire 格式完全一致（renderRecord 按 mid(5) 解前缀）
+	//文本：signalSendMsg 传出的 msg 尚无 5 位长度前缀（前缀由 sendMessage 补给网络包），
+	//此处用相同算法补齐（UTF-8 字节数、右对齐补零），否则重放时前 5 字符被当前缀吃掉
+	//表情：appendMsg 已拼好 "Nimages..." 头，无需处理
+	if (msgType == 1) {
+		record.msg = QString::number(msg.toUtf8().size()).rightJustified(5, '0') + msg;
+	}
+	else {
+		record.msg = msg;
+	}
+	record.mine = true;
+	TalkSessionStore::getInstance().appendSelfRecord(this->m_talkId, record);
+}
+
+void TalkWindow::onStoredMessage(int uid, int groupFlag, int sendId, int recvId, int msgType, const QString& msg) {
+	//仓库广播入口
+	if (uid != this->m_talkId) {
+		return;
+	}
+
+	//按记录渲染左侧气泡
+	MsgRecord record;
+	record.groupFlag = groupFlag;
+	record.sendId = sendId;
+	record.recvId = recvId;
+	record.msgType = msgType;
+	record.msg = msg;
+	record.mine = false;
+	this->renderRecord(record);
+}
+
+void TalkWindow::onPageLoadFinished(bool ok) {
+	//页面就绪后重放全部历史（含自己发的与对方发的）
+	if (ok) {
+		this->replayHistory();
+	}
 }
 
 void TalkWindow::onSendBtnClicked() {

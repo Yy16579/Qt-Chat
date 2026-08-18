@@ -80,6 +80,8 @@ set(PROJECT_SOURCES
     TalkWindow.ui
     WindowManager.h
     WindowManager.cpp
+    TalkSessionStore.h
+    TalkSessionStore.cpp
     QMsgTextEdit.h
     QMsgTextEdit.cpp
     MsgWebView.h

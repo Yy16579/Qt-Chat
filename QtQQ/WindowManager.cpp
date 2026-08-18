@@ -1,6 +1,7 @@
 #include "WindowManager.h"
-#include "TalkWindow.h"      
-#include "TalkWindowItem.h" 
+#include "TalkWindow.h"
+#include "TalkWindowItem.h"
+#include "TalkSessionStore.h"
 
 #include <QSqlQuery>
 
@@ -9,7 +10,10 @@ WindowManager::WindowManager()
 	: QObject(nullptr)
 	, m_talkwindowshell(nullptr)
 	, m_empID(-1)
-{}
+{
+	//监听会话仓库广播：网络消息入仓后驱动开窗策略
+	connect(&TalkSessionStore::getInstance(), &TalkSessionStore::signalMessageStored, this, &WindowManager::onStoredMessage);
+}
 
 WindowManager::~WindowManager()
 {}
@@ -108,3 +112,24 @@ void WindowManager::addNewTalkWindow(const int& uid) {
 TalkWindowShell* WindowManager::getTalkWindowShell() const {
 	return m_talkwindowshell; 
 };
+
+
+//槽函数
+void WindowManager::onStoredMessage(int talkId, int groupFlag, int sendId, int recvId, int msgType, const QString& msg) {
+	//消息接收开窗策略：
+	//聊天壳已打开（用户处于聊天场景）→ 自动打开/选中该会话窗口，消息即时可见
+	//聊天壳未打开（非聊天场景）→ 不打扰：消息只躺在仓库里
+	//Q_UNUSED：本槽只关心开窗，消息内容已由 TalkWindow 渲染
+	Q_UNUSED(groupFlag);
+	Q_UNUSED(sendId);
+	Q_UNUSED(recvId);
+	Q_UNUSED(msgType);
+	Q_UNUSED(msg);
+
+	if (this->m_talkwindowshell == nullptr) {
+		return;		//壳未创建：不自动拉起聊天壳
+	}
+
+	//壳已存在：该会话窗口若已开则 addNewTalkWindow 内部自动选中，未开则创建并重放历史
+	this->addNewTalkWindow(talkId);
+}

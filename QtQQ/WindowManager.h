@@ -26,6 +26,10 @@ private:
 	WindowManager(const WindowManager&) = delete;
 	WindowManager& operator=(const WindowManager&) = delete;
 
+private slots:
+	//槽函数
+	void onStoredMessage(int talkId, int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
+
 private:
 	//成员变量
 	QMap<int, QWidget*> m_windowMap;		// uid - TalkWindow 的映射

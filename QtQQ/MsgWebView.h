@@ -77,7 +77,11 @@ public:
 	void init(int talkUid, bool isGroupTalk);
 
 public:
-	void appendMsg(const QString& html, const QString strObj = "0");	//发送消息(strObj="0")或接收消息(strObj=QQ号)
+	void appendMsg(const QString& html, const QString strObj = "0");
+	// strObj 三种模式：
+	//   "0"  = 发送消息（显示右侧气泡 + emit signalSendMsg 走网络）
+	//   "-1" = 纯显示（重放自己发过的历史：只显示右侧气泡，不 emit，防止历史消息重发网络）
+	//   其他 = 接收消息（strObj 为发送者ID，显示左侧气泡，头像按 external_<ID> 模板）
 
 private:
 	QList<QStringList> parseHtml(const QString& html);			// 解析 HTML
