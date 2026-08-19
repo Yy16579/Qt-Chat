@@ -16,6 +16,8 @@ public:
 
 	void setUid(int uid);
 	int getUid() const;
+	void touch();				//刷新最后活跃时间，为当前时刻
+	qint64 lastActive() const;	//读取最后活跃时间
 
 signals:
 	//信号
@@ -33,5 +35,6 @@ private:
 
 	QByteArray m_buffer;	// 数据包接收缓冲区，用于粘包处理
 
+	qint64 m_lastActive;	// 最后活跃时间（收到任何包都刷新）
 };
 

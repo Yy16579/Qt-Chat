@@ -23,7 +23,7 @@ QList<MsgRecord> TalkSessionStore::records(int uid) const {
 }
 
 void TalkSessionStore::appendSelfRecord(int uid, const MsgRecord& record) {
-	//自己发的消息入库（发送路径已即时显示右侧气泡，此处静默入库，不广播）
+	//将自己发的消息入库（发送路径已即时显示右侧气泡，此处静默入库，不广播）
 	this->m_sessionMap[uid].messages.append(record);
 }
 

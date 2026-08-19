@@ -3,12 +3,14 @@
 
 #include <QDebug>
 #include <QtEndian>
+#include <QDateTime>
 
 
 TcpSocket::TcpSocket(QObject* parent)
 	: QTcpSocket(parent)
 	, m_descriptor(-1)
 	, m_uid(-1)
+	, m_lastActive(QDateTime::currentMSecsSinceEpoch())
 {}
 
 TcpSocket::~TcpSocket()
@@ -29,6 +31,14 @@ void TcpSocket::setUid(int uid) {
 
 int TcpSocket::getUid() const {
 	return this->m_uid;
+}
+
+void TcpSocket::touch() {
+	this->m_lastActive = QDateTime::currentMSecsSinceEpoch();
+}
+
+qint64 TcpSocket::lastActive() const {
+	return this->m_lastActive;
 }
 
 

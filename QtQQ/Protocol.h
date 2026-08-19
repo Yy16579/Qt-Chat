@@ -36,6 +36,7 @@ enum class PacketType : quint16 {
 
     // === 状态类 (0x05xx) - 无数据体 ===
     Heartbeat       = 0x0501,   // 心跳包
+    HeartbeatResponse = 0x0502, // 心跳响应
 
     // === 系统类 (0xFFxx) - 数据体为文本格式 ===
     ErrorResponse   = 0xFF02    // 错误响应

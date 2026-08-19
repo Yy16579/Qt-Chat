@@ -5,6 +5,7 @@
 
 #include <QTcpServer>
 #include <QHash>
+#include <QTimer>
 
 
 class TcpServer  : public QTcpServer
@@ -46,6 +47,8 @@ private slots:
 	void onPacketReady(const QByteArray& data, int descriptor);		// 解析数据包，分发业务
 	void onClientDisconnected(int descriptor);						// 客户端断开连接
 
+	void onCheckTimeout();		//心跳超时扫描
+
 private:
 	//成员变量
 	int m_port;			//监听的端口号
@@ -53,6 +56,7 @@ private:
 	QHash<int, TcpSocket*> m_fdSocketMap;		// 连接表：fd → socket（用于连接管理、广播、断开清理）
 	QHash<int, TcpSocket*> m_uidSocketMap;		// 路由表：uid → socket（用于精准转发）（客户端成功登录时添加）
 
+	QTimer* m_checkTimer;		//心跳超时扫描定时器
 	QHash<PacketType, void (TcpServer::*)(const QByteArray&, const QByteArray&, int)> m_handlers;		// 业务表
 };
 

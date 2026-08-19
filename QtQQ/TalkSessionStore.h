@@ -22,7 +22,7 @@ struct TalkSession {
 
 
 //会话仓库
-//职责：接收网络消息 → 路由归档 → 广播通知；为窗口提供历史重放
+//职责：接收网络消息 → 路由归档 → 广播通知
 //生命周期：随进程常驻（单例），退出登录时需 clear 防跨账号串数据
 class TalkSessionStore : public QObject
 {
@@ -31,9 +31,9 @@ class TalkSessionStore : public QObject
 public:
 	static TalkSessionStore& getInstance();
 
-	QList<MsgRecord> records(int talkId) const;		//获取会话全部历史记录（打开窗口时全量重放用）
-	void appendSelfRecord(int talkId, const MsgRecord& record);		//追加一条记录到自己发的会话（发送路径调用，窗口已即时显示，仅静默入库供日后重放）
-	void clear();		//清空所有会话（退出登录时调用，防止新账号看到旧账号的聊天记录）
+	QList<MsgRecord> records(int uid) const;		//获取会话记录（创建窗口时调用，用于加载历史消息记录）
+	void appendSelfRecord(int uid, const MsgRecord& record);		//将自己发的消息追加至会话仓库
+	void clear();		//清空会话仓库（退出登录时调用，防止新账号看到旧账号的聊天记录）
 
 private:
 	TalkSessionStore();
@@ -43,7 +43,7 @@ private:
 
 signals:
 	//信号
-	void signalMessageStored(int talkId, int groupFlag, int sendId, int recvId, int msgType, const QString& msg);	//消息入仓广播：携带完整字段（窗口渲染需 sendId 定头像、msgType 做逆向转换）
+	void signalMessageStored(int uid, int groupFlag, int sendId, int recvId, int msgType, const QString& msg);	//消息入仓广播：携带完整字段（窗口渲染需 sendId 定头像、msgType 做逆向转换）
 
 private slots:
 	//槽函数

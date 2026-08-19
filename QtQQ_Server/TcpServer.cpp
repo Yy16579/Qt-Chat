@@ -4,11 +4,19 @@
 #include <QtEndian>
 #include <QSqlQuery> 
 #include <QSqlError>
+#include <QDateTime>
 
 
 TcpServer::TcpServer(int port)
 	: m_port(port)
 {
+	//初始化心跳超时扫描定时器，每 30s 巡检
+	this->m_checkTimer = new QTimer(this);
+	this->m_checkTimer->setInterval(30 * 1000);
+	connect(this->m_checkTimer, &QTimer::timeout, this, &TcpServer::onCheckTimeout);
+	this->m_checkTimer->start();
+
+	//注册业务表
 	this->registerHandlers();
 }
 
@@ -239,7 +247,8 @@ void TcpServer::handleDbQuery(const QByteArray& fullPacket, const QByteArray& da
 }
 
 void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
-	// TODO: 更新客户端最后活跃时间（后期做心跳超时检测）
+	// 收到心跳包，回发心跳响应
+	this->sendPacket(static_cast<quint16>(PacketType::HeartbeatResponse), QByteArray(), m_fdSocketMap.value(descriptor));
 }
 
 void TcpServer::sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target) {
@@ -308,10 +317,16 @@ void TcpServer::onPacketReady(const QByteArray& data, int descriptor) {
 		return;
 	}
 
-	// 4. 提取数据体（剥离外层包头）
+	// 提取数据体（剥离外层包头）
 	QByteArray dataBody = data.mid(PACKET_HEADER_SIZE);
 
-	// 5. 查业务表分发业务
+	// 刷新 socket 最后活跃时间
+	TcpSocket* srcSocket = this->m_fdSocketMap.value(descriptor);
+	if (srcSocket) {
+		srcSocket->touch();
+	}
+
+	// 查业务表分发业务
 	auto it = this->m_handlers.find(static_cast<PacketType>(packetType));
 	if (it != m_handlers.end()) {
 		(this->*it.value())(data, dataBody, descriptor);
@@ -346,4 +361,26 @@ void TcpServer::onClientDisconnected(int descriptor) {
 		.arg(descriptor).arg(m_fdSocketMap.size());
 }
 
+void TcpServer::onCheckTimeout() {
+	//遍历连接表，将心跳超时的 socket 踢除
+
+	qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+	//遍历中可能触发 onClientDisconnected 修改 m_fdSocketMap，先取出待踢列表再动手
+	QList<TcpSocket*> deadSockets;
+	for (TcpSocket* socket : this->m_fdSocketMap) {
+		if (now - socket->lastActive() > 30 * 1000) {
+			deadSockets.append(socket);
+		}
+	}
+
+	for (TcpSocket* socket : deadSockets) {
+		qDebug() << QStringLiteral("[心跳超时] fd=%1 uid=%2 超过30s无活动，踢除").arg(socket->socketDescriptor()).arg(socket->getUid());
+
+		// 服务端可能还往它身上写过东西 ：踢线前刚转发的消息、LoginResponse、KickOut 包……
+		// 这些可能还躺在发送缓冲里没被对方 ACK。如果用 abort，这些数据直接扔了；
+		// 用 disconnectFromHost，TCP 会尽力重传投递（对端若只是网络抖动真还活着，数据能到）。
+		socket->disconnectFromHost();		//触发现有 onClientDisconnected 清理链
+	}
+}
 

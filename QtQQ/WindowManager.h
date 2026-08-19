@@ -28,7 +28,7 @@ private:
 
 private slots:
 	//槽函数
-	void onStoredMessage(int talkId, int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
+	void onStoredMessage(int uid, int groupFlag, int sendId, int recvId, int msgType, const QString& msg);	//仓库广播入口
 
 private:
 	//成员变量

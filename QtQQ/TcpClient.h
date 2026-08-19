@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <QTcpSocket>
+#include <QTimer>
 
 
 //连接地址和端口从 config.ini 的 [Tcp] 节读取
@@ -59,6 +60,7 @@ private:
 signals:
 	//信号
 	void signalErrorOccurred(const QString& errorMsg);		//通用错误提示信号
+	void signalConnectionLost();		//连接丢失信号
 
 	// 数据包业务分发信号 ======================================================================================
 	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
@@ -74,5 +76,8 @@ private:
 	//成员变量
 	QTcpSocket* m_tcpClientSocket;
 
-	QByteArray m_buffer;	//数据包接收缓冲区
+	QByteArray m_buffer;		//数据包接收缓冲区
+	
+	QTimer* m_heartbeatTimer;	//心跳发送定时器（10s 周期）
+	qint64 m_lastPongTime;		//最后收到心跳响应的时间戳
 };

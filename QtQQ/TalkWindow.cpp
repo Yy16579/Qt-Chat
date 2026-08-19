@@ -207,7 +207,7 @@ void TalkWindow::addPeopleItem(QTreeWidgetItem* pRootGroupItem, int empID) {
 }	
 
 void TalkWindow::renderRecord(const MsgRecord& record) {
-	//按一条记录渲染气泡（增量显示与历史重放共用，保证两处渲染一致）
+	//按一条记录，增量渲染气泡
 	//wire → html 逆向转换（发送侧 appendMsg 拼包的镜像操作）
 
 	QString html;
@@ -250,7 +250,7 @@ void TalkWindow::renderRecord(const MsgRecord& record) {
 }
 
 void TalkWindow::replayHistory() {
-	//重放会话仓库中本会话的全部历史（窗口刚创建/重开时）
+	//加载会话仓库中本会话的全部历史记录（窗口刚创建/重开时）
 	QList<MsgRecord> history = TalkSessionStore::getInstance().records(this->m_talkId);
 	for (int i = 0; i < history.size(); i++) {
 		this->renderRecord(history.at(i));
@@ -260,12 +260,11 @@ void TalkWindow::replayHistory() {
 
 //槽函数
 void TalkWindow::onMsgSend(const QString& msg, int msgType, const QString file) {
-	//通过 TcpClient 单例向服务端发送消息数据
+	//向服务端发送消息数据
 	int sendID = WindowManager::getInstance().m_empID;
 	TcpClient::getInstance().sendMessage(this->m_isGroupTalk, sendID, this->m_talkId, msgType, msg, file);
 
-	//自己发的消息同步入会话仓库（静默入库不广播，窗口已即时显示右侧气泡）
-	//否则重开窗口时历史里缺自己说过的话
+	//自己发的消息同步入会话仓库
 	MsgRecord record;
 	record.groupFlag = this->m_isGroupTalk ? 1 : 0;
 	record.sendId = sendID;
@@ -304,7 +303,7 @@ void TalkWindow::onStoredMessage(int uid, int groupFlag, int sendId, int recvId,
 }
 
 void TalkWindow::onPageLoadFinished(bool ok) {
-	//页面就绪后重放全部历史（含自己发的与对方发的）
+	//页面就绪后，加载全部历史消息记录（含自己发的与对方发的）
 	if (ok) {
 		this->replayHistory();
 	}

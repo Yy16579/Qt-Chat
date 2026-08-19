@@ -6,12 +6,19 @@
 #include <QMessageBox>
 #include <QtEndian>
 #include <QDebug>
+#include <QDateTime>
 
 
 TcpClient::TcpClient()
 	:QObject(nullptr)
 	, m_tcpClientSocket(nullptr)
-{}
+	, m_lastPongTime(0)
+{
+	//创建心跳定时器（10s 周期）
+	this->m_heartbeatTimer = new QTimer(this);
+	this->m_heartbeatTimer->setInterval(10 * 1000);
+	connect(this->m_heartbeatTimer, &QTimer::timeout, this, &TcpClient::sendHeartbeat);
+}
 
 TcpClient::~TcpClient() 
 {}
@@ -71,14 +78,23 @@ void TcpClient::connectToServer() {
 			this, [this]() {
 				// connect 成功，打印连接成功消息
 				qDebug() << "TCP connected";
+				
+				//启动心跳定时器
+				this->m_lastPongTime = QDateTime::currentMSecsSinceEpoch();	
+				this->m_heartbeatTimer->start();
 		});
 
 		//监听 socket  readyRead 信号
 		connect(this->m_tcpClientSocket, &QTcpSocket::readyRead, this, &TcpClient::onReadyRead);
 
 		//监听 socket  disconnected 信号
-		connect(this->m_tcpClientSocket, &QTcpSocket::disconnected, this, [this]() {
-			this->m_buffer.clear();
+		connect(this->m_tcpClientSocket, &QTcpSocket::disconnected, 
+			this, [this]() {
+				//清空缓冲区
+				this->m_buffer.clear();
+
+				//停止心跳定时器
+				this->m_heartbeatTimer->stop();
 		});
 	}
 
@@ -186,7 +202,7 @@ void TcpClient::sendLogout() {
 	//用户主动退出登录：通知服务端解绑并断开连接
 
 	//先检查 socket 状态
-	if (!this->m_tcpClientSocket || this->m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
+	if (!m_tcpClientSocket || m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
 		return;
 	}
 
@@ -207,7 +223,24 @@ void TcpClient::sendDbQuery(const QString& sql, const QStringList& params) {
 }
 
 void TcpClient::sendHeartbeat() {
+	//心跳超时自检：3个周期（30s）没收到任何回音 → 判定半开失联
+	if (QDateTime::currentMSecsSinceEpoch() - this->m_lastPongTime > 30 * 1000) {
+		qDebug() << QStringLiteral("[心跳] 超过30s未收到服务端回音，连接失联");
 
+		//停止心跳定时器
+		this->m_heartbeatTimer->stop();
+
+		//复位 socket（会自动触发 disconnected 信号）
+		// abort 同步复位不阻塞 connectToHost ，方便后续快速断线重连
+		this->m_tcpClientSocket->abort();
+
+		//发送连接丢失信号
+		emit this->signalConnectionLost();
+		return;
+	}
+
+	//未超时：发送心跳包（空载荷）
+	this->sendPacket(static_cast<quint16>(PacketType::Heartbeat), QByteArray());
 }
 
 void TcpClient::sendPacket(quint16 packetType, const QByteArray& dataBody) {
@@ -339,6 +372,11 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 
 		//发射信号交给 UI 层（CCMainWindow）处理
 		emit this->signalKickedOut();
+	}
+	else if (packetType == static_cast<quint16>(PacketType::HeartbeatResponse)) {
+		// ===== 心跳响应包 =====
+		// 刷新时间戳
+		this->m_lastPongTime = QDateTime::currentMSecsSinceEpoch();
 	}
 	// ================================================================================================================
 }
