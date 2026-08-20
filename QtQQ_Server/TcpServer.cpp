@@ -105,8 +105,13 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 			qDebug() << QStringLiteral("[Message] %1 → %2 转发成功").arg(sendId).arg(recvId);
 		}
 		else {
-			//对方不在线
-			
+			//对方不在线，将消息插入离线表
+			QSqlQuery query;
+			query.prepare("INSERT INTO `tab_offline_msg` (`recv_id`, `content`) VALUES (?, ?)");
+			query.addBindValue(recvId);
+			query.addBindValue(dataBody);
+			query.exec();
+			qDebug() << QStringLiteral("[Offline] uid=%1 离线，消息入库暂存").arg(recvId);
 		}
 	}
 	else {
@@ -182,17 +187,19 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 	}
 	this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), data.toUtf8(), this->m_fdSocketMap.value(descriptor));
 
-	// 4. 若成功登录，添加至路由表
+	// 4. 若成功登录，添加至路由表，推送离线消息
 	if (result == "1") {
 		int uid = empID.toInt();
 		TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
-		
+
 		if (this->m_uidSocketMap.contains(uid) == true) {
 			// 路由表中存在登录记录
 			// 重复登录：发送 KickOut 包再断开连接
 			TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
 
 			if (oldSocket == socket) {
+				//推送离线消息
+				this->pushOfflineMessages(uid, socket);
 				return;
 			}
 
@@ -214,6 +221,9 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 
 		socket->setUid(uid);				//设置 socket 的 uid 字段
 		this->m_uidSocketMap.insert(uid, socket);	//添加至路由表
+
+		//推送离线消息
+		this->pushOfflineMessages(uid, socket);
 	}
 }
 
@@ -249,6 +259,35 @@ void TcpServer::handleDbQuery(const QByteArray& fullPacket, const QByteArray& da
 void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
 	// 收到心跳包，回发心跳响应
 	this->sendPacket(static_cast<quint16>(PacketType::HeartbeatResponse), QByteArray(), m_fdSocketMap.value(descriptor));
+}
+
+void TcpServer::pushOfflineMessages(int uid, TcpSocket* socket) {
+	//推送该用户全部离线消息：逐条 发送→删除
+
+	QSqlQuery query;
+	query.prepare("SELECT `id`, `content` FROM `tab_offline_msg` WHERE `recv_id` = ? ORDER BY `id` ASC");
+	query.addBindValue(uid);
+	query.exec();
+
+	int count = 0;
+	while (query.next() == true) {
+		int msgId = query.value(0).toInt();
+		QByteArray content = query.value(1).toByteArray();
+
+		//直接把存的 dataBody 原文作为 Message 包发送（零转换，客户端当普通消息处理）
+		this->sendPacket(static_cast<quint16>(PacketType::Message), content, socket);
+
+		//推送一条删除一条
+		QSqlQuery delQuery;
+		delQuery.prepare("DELETE FROM `tab_offline_msg` WHERE `id` = ?");
+		delQuery.addBindValue(msgId);
+		delQuery.exec();
+		count++;
+	}
+
+	if (count > 0) {
+		qDebug() << QStringLiteral("[Offline] uid=%1 登录，已推送 %2 条离线消息").arg(uid).arg(count);
+	}
 }
 
 void TcpServer::sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target) {

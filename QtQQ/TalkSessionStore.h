@@ -1,7 +1,7 @@
 #pragma once
 
 #include <QObject>
-#include <QMap>
+#include <QSqlDatabase>
 #include <QList>
 
 
@@ -15,15 +15,10 @@ struct MsgRecord {
 	bool mine;			// true=我发的（渲染右侧气泡）
 };
 
-//会话（追加式消息日志）
-struct TalkSession {
-	QList<MsgRecord> messages;
-};
-
 
 //会话仓库
 //职责：接收网络消息 → 路由归档 → 广播通知
-//生命周期：随进程常驻（单例），退出登录时需 clear 防跨账号串数据
+//生命周期：随进程常驻（单例），退出登录时需 close 防跨账号串数据
 class TalkSessionStore : public QObject
 {
 	Q_OBJECT
@@ -31,9 +26,10 @@ class TalkSessionStore : public QObject
 public:
 	static TalkSessionStore& getInstance();
 
-	QList<MsgRecord> records(int uid) const;		//获取会话记录（创建窗口时调用，用于加载历史消息记录）
+	void open(int empID);		//登录成功后调用：打开/创建该账号的本地消息库 msg_<empID>.db
+	QList<MsgRecord> records(int uid);		//获取会话记录（创建窗口时调用，用于加载历史消息记录）
 	void appendSelfRecord(int uid, const MsgRecord& record);		//将自己发的消息追加至会话仓库
-	void clear();		//清空会话仓库（退出登录时调用，防止新账号看到旧账号的聊天记录）
+	void close();		//关闭本地消息库（退出登录时调用；数据文件保留，下次登录历史还在）
 
 private:
 	TalkSessionStore();
@@ -51,6 +47,7 @@ private slots:
 
 private:
 	//成员变量
-	QMap<int, TalkSession> m_sessionMap;		// uid - 会话 的映射
+	QSqlDatabase m_db;		//本地仓库
+	bool m_isOpen;			//库是否打开
 
 };

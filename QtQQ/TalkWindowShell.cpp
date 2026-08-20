@@ -83,7 +83,7 @@ void TalkWindowShell::initControl() {
 	ui.listWidget->setStyle(new CustomProxyStyle(this));
 
 	//创建表情窗口，将窗口隐藏
-	this->m_emotionWindow = new EmotionWindow;
+	this->m_emotionWindow = new EmotionWindow(this);
 	this->m_emotionWindow->hide();
 
 	//连接信号槽

@@ -176,8 +176,8 @@ void CCMainWindow::addGroupItem(QTreeWidgetItem* pRootGroupItem, int depID) {
 void CCMainWindow::doLocalLogout() {
     //退出登录本地清理（用户主动退出与被踢下线共用）
 
-    //1. 清空会话仓库
-    TalkSessionStore::getInstance().clear();
+    //1. 关闭本地消息库（数据文件保留，下次登录历史还在；防止跨账号串数据）
+    TalkSessionStore::getInstance().close();
 
     //2. 关闭聊天窗口壳（内部所有聊天窗口随之销毁，WindowManager::destroyed 置空指针）
     if (WindowManager::getInstance().getTalkWindowShell()) {

@@ -79,7 +79,7 @@ void TcpClient::connectToServer() {
 				// connect 成功，打印连接成功消息
 				qDebug() << "TCP connected";
 				
-				//启动心跳定时器
+				//启动心跳定时器，定时发送心跳包
 				this->m_lastPongTime = QDateTime::currentMSecsSinceEpoch();	
 				this->m_heartbeatTimer->start();
 		});

@@ -39,6 +39,10 @@ private:
 	// ======================================================================================================
 
 private:
+	// 离线消息推送
+	void pushOfflineMessages(int uid, TcpSocket* socket);
+
+private:
 	// 数据包 包头拼接与发送
 	void sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target);
 
