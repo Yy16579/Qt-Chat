@@ -124,7 +124,6 @@ void UserLogin::onLoginResponse(bool result, int empID) {
 	//查看登录响应结果
 	if (result == true) {
 		//打开该账号的本地消息库（必须在 new CCMainWindow 之前：
-		//同线程直连 + 串行切包保证——离线推送消息处理前，库已就位、m_empID 已设置）
 		TalkSessionStore::getInstance().open(empID);
 
 		//账号密码正确，传入用户 employeeID ，进入主窗口

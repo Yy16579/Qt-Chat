@@ -28,7 +28,7 @@ private:
 	void addPeopleItem(QTreeWidgetItem* pRootGroupItem, int empID);		//联系人树 添加联系人子项
 
 	void renderRecord(const MsgRecord& record);		//增量渲染气泡
-	void replayHistory();		//加载会话仓库的全部历史记录
+	void replayHistory();		//加载本地仓库的全部历史记录
 
 private slots:
 	//槽函数

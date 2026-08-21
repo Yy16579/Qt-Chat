@@ -72,6 +72,15 @@ void CCMainWindow::initControl() {
     connect(&TcpClient::getInstance(), &TcpClient::signalKickedOut,
         this, &CCMainWindow::onKickedOut);
 
+    //断线/重连状态提示（标题栏后缀，恢复逻辑幂等防重复叠加）
+    connect(&TcpClient::getInstance(), &TcpClient::signalReconnectStarted, this, [this]() {
+        this->setWindowTitle(QStringLiteral("QtQQ") + QStringLiteral("  [连接已断开，重连中...]"));
+        });
+    connect(&TcpClient::getInstance(), &TcpClient::signalReconnected, this, [this]() {
+        this->setWindowTitle(QStringLiteral("QtQQ"));
+        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("连接已恢复"));
+        });
+
     //添加应用控件
     QHBoxLayout* appupLayout = new QHBoxLayout;     //创建水平布局
     appupLayout->setContentsMargins(0, 0, 0, 0);    //设置布局边距

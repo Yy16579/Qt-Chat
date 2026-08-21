@@ -7,6 +7,15 @@
 #include <QTimer>
 
 
+
+// 断线意图
+enum class DisconnectIntent {
+	None,       //意外断线（服务端崩溃/网络故障/心跳超时abort）→ 触发自动重连
+	Logout,     //用户主动登出 → 不重连（凭据清除，回登录页）
+	KickOut     //被踢下线 → 不重连（防"重连→重登→再踢"死循环）
+};
+
+
 //连接地址和端口从 config.ini 的 [Tcp] 节读取
 class TcpClient : public QObject
 {
@@ -52,6 +61,11 @@ private:
 	void onProcessPacket(const QByteArray& packet);
 
 private:
+	// 重连调度
+	void startReconnect();		//启动/重排下一轮重连（指数退避 3s 起，60s 封顶）
+	void stopReconnect();		//停止重连并重置退避计数
+
+private:
 	TcpClient();
 	~TcpClient();
 	TcpClient(const TcpClient&) = delete;
@@ -60,7 +74,9 @@ private:
 signals:
 	//信号
 	void signalErrorOccurred(const QString& errorMsg);		//通用错误提示信号
-	void signalConnectionLost();		//连接丢失信号
+	
+	void signalReconnectStarted();		//重连流程启动信号（UI 提示用）
+	void signalReconnected();			//重连+重登成功，会话恢复信号（UI 恢复提示用）
 
 	// 数据包业务分发信号 ======================================================================================
 	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
@@ -72,12 +88,25 @@ private slots:
 	//槽函数
 	void onReadyRead();			//响应 readyRead 信号，负责 接收数据包 粘包切包 处理
 
+	void onReconnectTimeout();			//重连定时器到期：发起重连
+	void onLoginResponseInternal(bool result, int empID);		//内部槽：接管自动重登的响应（与 UserLogin 的槽靠 m_reloginPending 分流）
+
 private:
 	//成员变量
 	QTcpSocket* m_tcpClientSocket;
 
 	QByteArray m_buffer;		//数据包接收缓冲区
-	
+
 	QTimer* m_heartbeatTimer;	//心跳发送定时器（10s 周期）
 	qint64 m_lastPongTime;		//最后收到心跳响应的时间戳
+
+
+	QTimer* m_reconnectTimer;	//重连定时器（单次触发，按退避间隔重排）
+	int m_reconnectAttempts;	//已重试次数（计算退避间隔）
+	bool m_reloginPending;		//true=本次登录是自动重登（内部槽据此接管响应）
+	DisconnectIntent m_intent;      //断线意图
+	bool m_loggedIn;				//是否成功登录
+	QString m_account;              //重登凭据：账号（登录请求时留存）
+	QString m_password;             //重登凭据：密码
+
 };

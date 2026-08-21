@@ -28,8 +28,8 @@ public:
 
 	void open(int empID);		//登录成功后调用：打开/创建该账号的本地消息库 msg_<empID>.db
 	QList<MsgRecord> records(int uid);		//获取会话记录（创建窗口时调用，用于加载历史消息记录）
-	void appendSelfRecord(int uid, const MsgRecord& record);		//将自己发的消息追加至会话仓库
-	void close();		//关闭本地消息库（退出登录时调用；数据文件保留，下次登录历史还在）
+	void appendSelfRecord(int uid, const MsgRecord& record);		//将自己发的消息追加至本地仓库
+	void close();		//关闭本地仓库（退出登录时调用；数据文件保留，下次登录历史还在）
 
 private:
 	TalkSessionStore();

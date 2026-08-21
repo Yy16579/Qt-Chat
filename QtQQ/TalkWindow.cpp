@@ -250,7 +250,7 @@ void TalkWindow::renderRecord(const MsgRecord& record) {
 }
 
 void TalkWindow::replayHistory() {
-	//加载会话仓库中本会话的全部历史记录（窗口刚创建/重开时）
+	//加载本地仓库中本会话的全部历史记录（窗口刚创建/重开时）
 	QList<MsgRecord> history = TalkSessionStore::getInstance().records(this->m_talkId);
 	for (int i = 0; i < history.size(); i++) {
 		this->renderRecord(history.at(i));
