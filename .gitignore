@@ -3,7 +3,8 @@
 # ============================================================
 
 # ===== 构建产物 =====
-build/
+# build/ 匹配固定名目录；build*/ 覆盖 Qt Creator 影子构建目录（build-<项目>-<套件>-<配置>）
+build*/
 out/
 Debug/
 Release/
@@ -68,6 +69,27 @@ CMake Overview
 *.exe
 *.dll
 
+# ===== Linux 编译产物（GCC/Clang）=====
+*.o
+*.so
+*.so.*
+*.a
+
+# ===== Qt Creator =====
+# 内置 clangd 代码索引缓存目录
+.qtc_clangd/
+
+# ===== 其他编辑器 =====
+.vscode/
+.idea/
+.clangd/
+
+# ===== 数据库文件（本地聊天记录含隐私，绝不提交）=====
+# msg_<empID>.db：SQLite 本地会话仓库；-shm/-wal 为开启 WAL 模式后的伴随文件
+*.db
+*.db-shm
+*.db-wal
+
 # ===== 配置文件（含数据库密码等敏感信息，不提交） =====
 config/config.ini
 QtQQ/config/config.ini
@@ -82,3 +104,10 @@ QtQQ_Server/config/config.ini
 *~
 *.swp
 *.orig
+
+# ===== 系统垃圾文件 =====
+Thumbs.db
+.DS_Store
+
+# ===== 编辑器自动保存 =====
+*.autosave

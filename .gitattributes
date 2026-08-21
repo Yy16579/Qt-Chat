@@ -1,0 +1,42 @@
+# ============================================================
+# QtQQ 项目 Git 属性规则（跨平台换行符统一）
+# ============================================================
+# 原理：text=auto 让 Git 自动识别文本文件，入库统一 LF，检出按平台转换；
+# 未标记 text 的二进制文件不做任何转换，避免破坏图片等资源
+
+# ===== 默认：文本文件自动识别，入库统一 LF =====
+* text=auto
+
+# ===== 强制 LF（跨平台脚本/配置，CRLF 会导致 Linux 下执行失败）=====
+*.sh   text eol=lf
+*.py   text eol=lf
+Makefile text eol=lf
+
+# ===== 强制 CRLF（Windows 专属脚本）=====
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# ===== 源码与文本（显式声明，防止 auto 误判）=====
+*.cpp  text
+*.h    text
+*.ui   text
+*.qrc  text
+*.css  text
+*.html text
+*.js   text
+*.json text
+*.ini  text
+*.txt  text
+*.md   text
+*.cmake text
+CMakeLists.txt text
+qt.cmake text
+
+# ===== 二进制文件（禁止任何转换）=====
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.db   binary
+*.exe  binary
+*.dll  binary
