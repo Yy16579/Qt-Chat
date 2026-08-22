@@ -57,13 +57,12 @@ private:
 	// =================================================================================================================
 
 private:
-	// 解析数据包，分发业务
-	void onProcessPacket(const QByteArray& packet);
+	// 网络重连调度
+	void startReconnectTimer();		//启动重连定时器
 
 private:
-	// 重连调度
-	void startReconnect();		//启动/重排下一轮重连（指数退避 3s 起，60s 封顶）
-	void stopReconnect();		//停止重连并重置退避计数
+	// 解析数据包，分发业务
+	void onProcessPacket(const QByteArray& packet);
 
 private:
 	TcpClient();
@@ -78,6 +77,7 @@ signals:
 	void signalReconnectStarted();		//重连流程启动信号（UI 提示用）
 	void signalReconnected();			//重连+重登成功，会话恢复信号（UI 恢复提示用）
 
+
 	// 数据包业务分发信号 ======================================================================================
 	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
 	void signalLoginResponse(bool result, int empID);
@@ -88,8 +88,7 @@ private slots:
 	//槽函数
 	void onReadyRead();			//响应 readyRead 信号，负责 接收数据包 粘包切包 处理
 
-	void onReconnectTimeout();			//重连定时器到期：发起重连
-	void onLoginResponseInternal(bool result, int empID);		//内部槽：接管自动重登的响应（与 UserLogin 的槽靠 m_reloginPending 分流）
+	void onLoginResponseInternal(bool result, int empID);		//内部槽：接管自动重登的响应
 
 private:
 	//成员变量
@@ -100,13 +99,12 @@ private:
 	QTimer* m_heartbeatTimer;	//心跳发送定时器（10s 周期）
 	qint64 m_lastPongTime;		//最后收到心跳响应的时间戳
 
-
-	QTimer* m_reconnectTimer;	//重连定时器（单次触发，按退避间隔重排）
-	int m_reconnectAttempts;	//已重试次数（计算退避间隔）
-	bool m_reloginPending;		//true=本次登录是自动重登（内部槽据此接管响应）
 	DisconnectIntent m_intent;      //断线意图
-	bool m_loggedIn;				//是否成功登录
+
+	bool m_loggedIn;				//是否登录成功
 	QString m_account;              //重登凭据：账号（登录请求时留存）
 	QString m_password;             //重登凭据：密码
 
+	QTimer* m_reconnectTimer;		//断线重连定时器（单次触发，按退避间隔重排）
+	int m_reconnectAttempts;		//断线重连次数（计算退避间隔）
 };

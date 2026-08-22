@@ -72,13 +72,26 @@ void CCMainWindow::initControl() {
     connect(&TcpClient::getInstance(), &TcpClient::signalKickedOut,
         this, &CCMainWindow::onKickedOut);
 
-    //断线/重连状态提示（标题栏后缀，恢复逻辑幂等防重复叠加）
+    //断线/重连状态提示条（搜索框下方：断线常驻黄色警示，恢复绿色提示 2 秒后自动隐藏）
     connect(&TcpClient::getInstance(), &TcpClient::signalReconnectStarted, this, [this]() {
-        this->setWindowTitle(QStringLiteral("QtQQ") + QStringLiteral("  [连接已断开，重连中...]"));
+        //切换回警示样式（防止上一轮恢复态的绿色残留）
+        ui.reconnectTipLabel->setProperty("tipType", "warn");
+        ui.reconnectTipLabel->style()->unpolish(ui.reconnectTipLabel);
+        ui.reconnectTipLabel->style()->polish(ui.reconnectTipLabel);
+        ui.reconnectTipLabel->setText(QStringLiteral("网络连接已断开，正在重连..."));
+        ui.reconnectTipLabel->show();
         });
     connect(&TcpClient::getInstance(), &TcpClient::signalReconnected, this, [this]() {
-        this->setWindowTitle(QStringLiteral("QtQQ"));
-        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("连接已恢复"));
+        //动态属性切换为恢复样式，unpolish/polish 强制 QSS 重新求值
+        ui.reconnectTipLabel->setProperty("tipType", "ok");
+        ui.reconnectTipLabel->style()->unpolish(ui.reconnectTipLabel);
+        ui.reconnectTipLabel->style()->polish(ui.reconnectTipLabel);
+        ui.reconnectTipLabel->setText(QStringLiteral("连接已恢复"));
+        ui.reconnectTipLabel->show();
+        //停留 2 秒让用户确认连接已恢复，之后自动隐藏
+        QTimer::singleShot(2000, this, [this]() {
+            ui.reconnectTipLabel->hide();
+            });
         });
 
     //添加应用控件

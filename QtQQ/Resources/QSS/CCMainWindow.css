@@ -326,6 +326,20 @@ QTreeView::item:selected:active {
 	background-color: rgba(135, 206, 250, 153);
 }
 
+/* =========================== 断线重连提示条 ============================ */
+/* 提示条 - 断线警示态（默认：浅灰底红色文字，常驻显示直至恢复） */
+QLabel#reconnectTipLabel {
+	background-color: rgba(240, 240, 240, 235);
+	color: rgb(224, 49, 49);
+	font: 75 9pt "微软雅黑";
+}
+
+/* 提示条 - 恢复确认态（同底色，绿色文字，显示 2 秒后由代码隐藏） */
+QLabel#reconnectTipLabel[tipType="ok"] {
+	background-color: rgba(240, 240, 240, 235);
+	color: rgb(16, 124, 16);
+}
+
 /* 树形视图项 - 选中非激活态 / 悬浮态 */
 QTreeView::item:selected:!active, QTreeView::item:hover {
 	background-color: rgba(135, 206, 250, 50);

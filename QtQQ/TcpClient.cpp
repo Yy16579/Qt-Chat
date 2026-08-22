@@ -3,7 +3,6 @@
 
 #include <QSettings>
 #include <QHostAddress>
-#include <QMessageBox>
 #include <QtEndian>
 #include <QDebug>
 #include <QDateTime>
@@ -13,10 +12,9 @@ TcpClient::TcpClient()
 	:QObject(nullptr)
 	, m_tcpClientSocket(nullptr)
 	, m_lastPongTime(0)
-	, m_reconnectAttempts(0)
-	, m_reloginPending(false)
 	, m_intent(DisconnectIntent::None)
 	, m_loggedIn(false)
+	, m_reconnectAttempts(0)
 {
 	//创建心跳定时器（10s 周期）
 	this->m_heartbeatTimer = new QTimer(this);
@@ -26,9 +24,10 @@ TcpClient::TcpClient()
 	//创建重连定时器（单次触发：到期发起重连，结果决定是否重排下一轮）
 	this->m_reconnectTimer = new QTimer(this);
 	this->m_reconnectTimer->setSingleShot(true);
-	connect(this->m_reconnectTimer, &QTimer::timeout, this, &TcpClient::onReconnectTimeout);
+	connect(this->m_reconnectTimer, &QTimer::timeout, this, &TcpClient::connectToServer);
 
-	//监听自己的登录响应：自动重登时由内部槽接管（与 UserLogin 的槽靠 m_reloginPending 分流）
+
+	//监听自己的登录响应：自动重登的回音由内部槽接管
 	connect(this, &TcpClient::signalLoginResponse, this, &TcpClient::onLoginResponseInternal);
 }
 
@@ -84,12 +83,9 @@ void TcpClient::connectToServer() {
 				//其他异常错误，显示具体错误信息（如"主机找不到""连接被拒""网络中断"）
 				emit this->signalErrorOccurred(this->m_tcpClientSocket->errorString());
 
-				
-				//重连调度补丁：连接失败（如 ConnectionRefused）不触发 disconnected，
-				//单次触发的重连定时器也不会再响——若不加此重排，重连循环会在第一次失败后静默卡死
-				//仅重连流程中生效（attempts>0），首次登录失败不得进入重连循环
+				//断线重连次数 > 0 ，说明正处于断线重连状态，且连接依旧失败
 				if (this->m_reconnectAttempts > 0) {
-					this->startReconnect();
+					this->startReconnectTimer();	//重连失败，启动计时器，重排下次重连
 				}
 		});
 
@@ -103,14 +99,17 @@ void TcpClient::connectToServer() {
 				this->m_lastPongTime = QDateTime::currentMSecsSinceEpoch();
 				this->m_heartbeatTimer->start();
 
-
-				//重连成功且有留存凭据 + 曾登录成功过 → 自动静默重登
-				//（attempts>0 区分"重连"与"首次登录前的连接"，手动登录流程不介入）
-				if (this->m_loggedIn && !this->m_account.isEmpty() && this->m_reconnectAttempts > 0) {
-					//先发请求再立标记：sendLoginRequest 入口会清除残留的 pending
+				//静默重登：曾登录成功（凭据有效且已留存）→ 用留存凭据自动重新登录
+				if (this->m_loggedIn == true) {
+					//登录状态下断线重连成功
+					//只有重新登录后，才清零计数 m_reconnectAttempts = 0
 					this->sendLoginRequest(this->m_account, this->m_password);
-					this->m_reloginPending = true;		//标记：响应由内部槽接管
-			}
+				}
+				else {
+					//未登录状态下的连接成功（首次连接 / 登录页断线重连成功）：
+					//重连流程使命已尽（连接已恢复），清零计数 m_reconnectAttempts = 0
+					this->m_reconnectAttempts = 0;
+				}
 		});
 
 		//监听 socket  readyRead 信号
@@ -119,24 +118,25 @@ void TcpClient::connectToServer() {
 		//监听 socket  disconnected 信号
 		connect(this->m_tcpClientSocket, &QTcpSocket::disconnected,
 			this, [this]() {
-				//清空缓冲区
-				this->m_buffer.clear();
 
-				//停止心跳定时器
-				this->m_heartbeatTimer->stop();
-
-				//断线意图归因（所有断线路径最终都汇到 disconnected，统一在此分流）
+				this->m_heartbeatTimer->stop();	//停止心跳定时器
+				this->m_buffer.clear();			//清空缓冲区
+				
+				//断线意图判断（所有断线路径最终都汇到 disconnected，统一在此分流）
 				if (this->m_intent == DisconnectIntent::Logout || this->m_intent == DisconnectIntent::KickOut) {
 					//主动断开（登出/被踢）：不重连，清状态
-					this->m_intent = DisconnectIntent::None;		
+
+					this->m_intent = DisconnectIntent::None;
 					this->m_loggedIn = false;
 					this->m_account = "";
 					this->m_password = "";
-					this->stopReconnect();
+					this->m_reconnectAttempts = 0;
+
+					this->m_reconnectTimer->stop();		//封存可能挂起的重连定时器
 				}
 				else {
-					//意外断线（服务端崩溃/网络故障/心跳超时abort）：启动自动重连
-					this->startReconnect();
+					//意外断线（服务端崩溃/网络故障/心跳超时abort）：自动重连，开启重连定时器
+					this->startReconnectTimer();
 				}
 		});
 	}
@@ -243,13 +243,10 @@ void TcpClient::sendLoginRequest(const QString& account, const QString& password
 	//组装外层二进制头并发送（包类型=LoginRequest）
 	this->sendPacket(static_cast<quint16>(PacketType::LoginRequest), strSend.toUtf8());
 
-
-	this->m_intent = DisconnectIntent::None;
-	//发送即视为一次新登录：清除残留的重登标记
-	//（防上次自动重登响应未达时残留 true，被本次手动登录的响应误消费）
-	this->m_reloginPending = false;
+	//登录凭据留存
 	this->m_account = account;
 	this->m_password = password;
+	this->m_intent = DisconnectIntent::None;
 }
 
 void TcpClient::sendLogout() {
@@ -257,20 +254,21 @@ void TcpClient::sendLogout() {
 
 	//先检查 socket 状态
 	if (!m_tcpClientSocket || m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
-		//已处于断开态（如意外断线后用户再点登出）：disconnected 不会再触发，
-		//必须在此直接终结重连流程，否则定时器继续转→重连成功→自动重登→幽灵在线
-		this->m_intent = DisconnectIntent::Logout;
+		//未连接状态下的登出（如断线重连期间用户主动退出）：
+		//终止挂起的重连循环并清留存凭据——否则定时器触发重连后，
+		//connected 槽会拿旧凭据静默重登（幽灵登录/换号登录会登错账号）
+		this->m_reconnectTimer->stop();
+		this->m_reconnectAttempts = 0;
 		this->m_loggedIn = false;
 		this->m_account = "";
 		this->m_password = "";
-		this->stopReconnect();
 		return;
 	}
 
 	//发送注销包（告知服务端主动解绑，无需响应）
 	this->sendPacket(static_cast<quint16>(PacketType::Logout), QByteArray());
 
-	//断线归因
+	//断线意图
 	this->m_intent = DisconnectIntent::Logout;
 
 	//主动断开连接（会话终结）
@@ -323,6 +321,27 @@ void TcpClient::sendPacket(quint16 packetType, const QByteArray& dataBody) {
 
 	//发送
 	this->m_tcpClientSocket->write(packet);
+}
+
+void TcpClient::startReconnectTimer() {
+	//防重排守卫：同一次断线可能先后触发 errorOccurred 与 disconnected
+	//（如拔网线先报 ConnectionResetError 再走 disconnected），两处都会调用本函数；
+	//定时器已挂起说明本轮重连已排好，直接跳过（否则 attempts 一次跳两级、间隔翻倍）
+	if (this->m_reconnectTimer->isActive()) {
+		return;
+	}
+
+	//单次触发，根据重连次数，重排时间间隔
+	//指数退避：3s * 2^n，60s 封顶（第1次3s、第2次6s、第3次12s、第4次24s、第5次48s、之后60s）
+	int shift = qMin(this->m_reconnectAttempts, 5);
+	int interval = qMin(3 * 1000 * (1 << shift), 60 * 1000);
+	this->m_reconnectAttempts++;
+
+	//开启定时器
+	this->m_reconnectTimer->start(interval);
+
+	qDebug() << QStringLiteral("[Reconnect] 第%1次重连将于%2ms后发起").arg(this->m_reconnectAttempts).arg(interval);
+	emit this->signalReconnectStarted();		//通知 UI 进入"重连中"状态
 }
 
 void TcpClient::onProcessPacket(const QByteArray& packet) {
@@ -421,7 +440,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 			}
 			empID = dataBody.mid(1, 5).toInt();
 
-			//校验通过才置位（丢弃路径不留副作用）
+			//成功登录
 			this->m_loggedIn = true;
 		}
 
@@ -434,7 +453,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 		// 收到即触发被踢信号，由 UI 层弹提示并切回登录窗（此时连接即将断开，不再发包）
 		qDebug() << QStringLiteral("[KickOut] 收到踢下线通知");
 
-		//断线归因
+		//断线意图
 		this->m_intent = DisconnectIntent::KickOut;
 
 		//发射信号交给 UI 层（CCMainWindow）处理
@@ -446,27 +465,6 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 		this->m_lastPongTime = QDateTime::currentMSecsSinceEpoch();
 	}
 	// ================================================================================================================
-}
-
-void TcpClient::startReconnect() {
-	//指数退避：3s * 2^n，60s 封顶（第1次3s、第2次6s、第3次12s、第4次24s、第5次48s、之后60s）
-	//位移量封顶5（2^5=32→96s→qMin压到60s，数学等效）：attempts≥20时 1<<attempts 溢出int，
-	//间隔变负 → QTimer立即触发 → 重连风暴
-	int shift = qMin(this->m_reconnectAttempts, 5);
-	int interval = qMin(3 * 1000 * (1 << shift), 60 * 1000);
-	this->m_reconnectAttempts++;
-
-	this->m_reconnectTimer->start(interval);
-	qDebug() << QStringLiteral("[Reconnect] 第%1次重连将于%2ms后发起")
-		.arg(this->m_reconnectAttempts).arg(interval);
-
-	emit this->signalReconnectStarted();		//通知 UI 进入"重连中"状态
-}
-
-void TcpClient::stopReconnect() {
-	//停止重连并重置退避计数（下次断线从 3s 重新起跳）
-	this->m_reconnectTimer->stop();
-	this->m_reconnectAttempts = 0;
 }
 
 
@@ -524,32 +522,19 @@ void TcpClient::onReadyRead() {
 	}
 }
 
-void TcpClient::onReconnectTimeout() {
-	//重连定时器到期：发起连接
-	//connectToServer 内部已做状态检查（ConnectingState 直接 return），
-	//结果由 connected / errorOccurred 两条路径各自闭环
-	this->connectToServer();
-}
-
 void TcpClient::onLoginResponseInternal(bool result, int empID) {
-	//自动重登的响应接管（手动登录时 m_reloginPending=false，直接return，不干扰 UserLogin）
-	if (this->m_reloginPending == false) {
+	//只有"曾登录成功 + 处于未完成的重连流程"的登录响应，
+	//才视为自动重登的回音由本槽接管；其余（首次登录/手动再登录）交回 UserLogin 消费
+	if (this->m_loggedIn == false || this->m_reconnectAttempts == 0) {
 		return;
 	}
-	this->m_reloginPending = false;
 
-	if (result) {
-		//会话恢复成功：重置退避计数（下次断线从 3s 重新起跳）
-		this->m_reconnectAttempts = 0;
+	this->m_reconnectAttempts = 0;
+	
+	if (result == true) {
+		//重登成功：会话真正恢复，重置退避计数（下次断线从 3s 重新起跳）
 		qDebug() << QStringLiteral("[Reconnect] 重连+重登成功，uid=%1 会话已恢复").arg(empID);
 		emit this->signalReconnected();
-		//切记：此处不 new CCMainWindow / TalkSessionStore::open——
-		//窗口和本地库都活着；服务端重登时自动推离线消息补齐断线期间的消息
-	}
-	else {
-		//重登失败（如密码被改）：放弃自动重连，交给用户手动处理
-		this->m_loggedIn = false;		//会话已不可恢复，清除自动重登前提
-		this->stopReconnect();
-		emit this->signalErrorOccurred(QStringLiteral("自动重新登录失败，请手动重新登录"));
+		//服务端重登成功时会自动推送离线消息，补齐断线期间的消息
 	}
 }
