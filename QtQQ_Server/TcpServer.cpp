@@ -105,7 +105,7 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 			qDebug() << QStringLiteral("[Message] %1 → %2 转发成功").arg(sendId).arg(recvId);
 		}
 		else {
-			//对方不在线，将消息插入离线表
+			//对方不在线，将消息推送到离线表
 			QSqlQuery query;
 			query.prepare("INSERT INTO `tab_offline_msg` (`recv_id`, `content`) VALUES (?, ?)");
 			query.addBindValue(recvId);
@@ -115,9 +115,64 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 		}
 	}
 	else {
-		//为群聊
+		//为群聊：recvId 为 4 位群号（即 departmentID）
 		recvId = dataBody.mid(6, 4).toInt();
 
+		// 1. 查询群成员列表：
+		QList<int> memberIds;
+		QSqlQuery query;
+
+		query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
+		query.addBindValue(QStringLiteral("公司群"));
+		query.exec();
+		query.next();
+		int compDepID = query.value(0).toInt();
+
+		if (recvId == compDepID) {
+			//公司群：查全部在职员工
+			query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ?");
+			query.addBindValue(1);
+		}
+		else {
+			//普通群：查该部门在职员工
+			query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ? AND `departmentID` = ?");
+			query.addBindValue(1);
+			query.addBindValue(recvId);
+		}
+		query.exec();
+
+		//结果集先取出存列表（QSqlQuery 单结果集遍历，防止后续复用被破坏）
+		while (query.next() == true) {
+			memberIds << query.value(0).toInt();
+		}
+
+		// 2. 逐成员分发（跳过发送者本人：其客户端已本地入库+显示，回发会造成重复）
+		int onlineCount = 0;
+		int offlineCount = 0;
+		for (int memberId : memberIds) {
+			if (memberId == sendId) {
+				continue;
+			}
+
+			TcpSocket* targetSocket = this->m_uidSocketMap.value(memberId);
+			if (targetSocket != nullptr) {
+				//该成员在线：转发原包
+				targetSocket->write(fullPacket);
+				onlineCount++;
+			}
+			else {
+				//该成员离线：入离线表（上线时由 pushOfflineMessages 补发）
+				QSqlQuery insertQuery;
+				insertQuery.prepare("INSERT INTO `tab_offline_msg` (`recv_id`, `content`) VALUES (?, ?)");
+				insertQuery.addBindValue(memberId);
+				insertQuery.addBindValue(dataBody);
+				insertQuery.exec();
+				offlineCount++;
+			}
+		}
+
+		qDebug() << QStringLiteral("[GroupMessage] 群%1（%2人）：在线转发%3，离线暂存%4")
+			.arg(recvId).arg(memberIds.size()).arg(onlineCount).arg(offlineCount);
 	}
 }
 

@@ -71,7 +71,7 @@ private:
 	TcpClient& operator=(const TcpClient&) = delete;
 
 signals:
-	//信号
+	// 信号
 	void signalErrorOccurred(const QString& errorMsg);		//通用错误提示信号
 	
 	void signalReconnectStarted();		//重连流程启动信号（UI 提示用）
@@ -98,6 +98,7 @@ private:
 
 	QTimer* m_heartbeatTimer;	//心跳发送定时器（10s 周期）
 	qint64 m_lastPongTime;		//最后收到心跳响应的时间戳
+
 
 	DisconnectIntent m_intent;      //断线意图
 

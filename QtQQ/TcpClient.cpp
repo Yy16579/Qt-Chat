@@ -83,6 +83,7 @@ void TcpClient::connectToServer() {
 				//其他异常错误，显示具体错误信息（如"主机找不到""连接被拒""网络中断"）
 				emit this->signalErrorOccurred(this->m_tcpClientSocket->errorString());
 
+
 				//断线重连次数 > 0 ，说明正处于断线重连状态，且连接依旧失败
 				if (this->m_reconnectAttempts > 0) {
 					this->startReconnectTimer();	//重连失败，启动计时器，重排下次重连
@@ -99,6 +100,8 @@ void TcpClient::connectToServer() {
 				this->m_lastPongTime = QDateTime::currentMSecsSinceEpoch();
 				this->m_heartbeatTimer->start();
 
+
+				//重连计数器置零
 				//静默重登：曾登录成功（凭据有效且已留存）→ 用留存凭据自动重新登录
 				if (this->m_loggedIn == true) {
 					//登录状态下断线重连成功
@@ -122,7 +125,7 @@ void TcpClient::connectToServer() {
 				this->m_heartbeatTimer->stop();	//停止心跳定时器
 				this->m_buffer.clear();			//清空缓冲区
 				
-				//断线意图判断（所有断线路径最终都汇到 disconnected，统一在此分流）
+				//断线原因判断（所有断线路径最终都汇到 disconnected，统一在此分流）
 				if (this->m_intent == DisconnectIntent::Logout || this->m_intent == DisconnectIntent::KickOut) {
 					//主动断开（登出/被踢）：不重连，清状态
 
@@ -523,7 +526,7 @@ void TcpClient::onReadyRead() {
 }
 
 void TcpClient::onLoginResponseInternal(bool result, int empID) {
-	//只有"曾登录成功 + 处于未完成的重连流程"的登录响应，
+	//只有 "登录成功 + 处于未完成的重连流程" 的登录响应，
 	//才视为自动重登的回音由本槽接管；其余（首次登录/手动再登录）交回 UserLogin 消费
 	if (this->m_loggedIn == false || this->m_reconnectAttempts == 0) {
 		return;
@@ -532,7 +535,7 @@ void TcpClient::onLoginResponseInternal(bool result, int empID) {
 	this->m_reconnectAttempts = 0;
 	
 	if (result == true) {
-		//重登成功：会话真正恢复，重置退避计数（下次断线从 3s 重新起跳）
+		//重登成功：会话恢复，重置退避计数（下次断线从 3s 重新起跳）
 		qDebug() << QStringLiteral("[Reconnect] 重连+重登成功，uid=%1 会话已恢复").arg(empID);
 		emit this->signalReconnected();
 		//服务端重登成功时会自动推送离线消息，补齐断线期间的消息

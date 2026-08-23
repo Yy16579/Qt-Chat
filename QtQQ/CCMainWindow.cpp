@@ -69,8 +69,8 @@ void CCMainWindow::initControl() {
     connect(&NotifyManager::getInstance(), &NotifyManager::signalSkinChanged, this, [this]() {
         this->updateSearchStyle();
         });
-    connect(&TcpClient::getInstance(), &TcpClient::signalKickedOut,
-        this, &CCMainWindow::onKickedOut);
+    connect(&TcpClient::getInstance(), &TcpClient::signalKickedOut, this, &CCMainWindow::onKickedOut);
+
 
     //断线/重连状态提示条（搜索框下方：断线常驻黄色警示，恢复绿色提示 2 秒后自动隐藏）
     connect(&TcpClient::getInstance(), &TcpClient::signalReconnectStarted, this, [this]() {
@@ -93,6 +93,7 @@ void CCMainWindow::initControl() {
             ui.reconnectTipLabel->hide();
             });
         });
+
 
     //添加应用控件
     QHBoxLayout* appupLayout = new QHBoxLayout;     //创建水平布局
