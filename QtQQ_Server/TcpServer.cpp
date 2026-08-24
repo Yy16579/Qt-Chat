@@ -5,6 +5,9 @@
 #include <QSqlQuery> 
 #include <QSqlError>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 
 TcpServer::TcpServer(int port)
@@ -231,16 +234,29 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 
 	// 3. 回发登录响应包
 	//格式：成功 = 结果标志1B + uid5B（客户端按 mid(1,5) 定长解析，uid 不足5位需补零）；失败 = "0"
-	QString data;
+	QByteArray body;
 	if (result == "1") {
-		data = result + empID.rightJustified(5, '0');
+		body.append(result.toUtf8());
+		body.append(empID.rightJustified(5, '0').toUtf8());
 		qDebug() << QStringLiteral("[LoginRequest] fd=%1 登录成功，uid=%2").arg(descriptor).arg(empID);
+
+		//登录成功 → 追加通讯录快照（首登/静默重登/互踢后重登，所有路径统一在此刷新）
+		QByteArray snapshot = this->buildContactSnapshot();
+
+		//长度兜底：外层长度字段 quint16（包类型2B+长度2B），超限退化为不带快照的原格式（登录仍可用）
+		if (body.size() + snapshot.size() <= 65528) {
+			body.append(snapshot);
+		}
+		else {
+			qWarning() << QStringLiteral("[LoginRequest] 通讯录快照过大（%1B），本次登录不携带")
+				.arg(snapshot.size());
+		}
 	}
 	else {
-		data = result;
+		body = result.toUtf8();
 		qDebug() << QStringLiteral("[LoginRequest] fd=%1 账号密码验证失败").arg(descriptor);
 	}
-	this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), data.toUtf8(), this->m_fdSocketMap.value(descriptor));
+	this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, this->m_fdSocketMap.value(descriptor));
 
 	// 4. 若成功登录，添加至路由表，推送离线消息
 	if (result == "1") {
@@ -343,6 +359,55 @@ void TcpServer::pushOfflineMessages(int uid, TcpSocket* socket) {
 	if (count > 0) {
 		qDebug() << QStringLiteral("[Offline] uid=%1 登录，已推送 %2 条离线消息").arg(uid).arg(count);
 	}
+}
+
+QByteArray TcpServer::buildContactSnapshot() {
+	//通讯录快照打包：两张表全量 → 紧凑 JSON
+	//调用时机：登录认证成功后随 LoginResponse 下发，客户端 ContactBook 缓存的数据源
+	
+	// 打包 tab_employees 全量表（过滤 status = 0 的用户）
+	QJsonArray employees;
+	
+	QSqlQuery query;
+	query.prepare("SELECT `employeeID`, `employee_name`, `employee_sign`, `picture`, `departmentID` FROM `tab_employees` WHERE `status` = ?");
+	query.addBindValue(1);
+	query.exec();
+	while (query.next() == true) {
+		QJsonObject emp;
+		emp.insert("employeeID", query.value(0).toInt());
+		emp.insert("employee_name", query.value(1).toString());
+		emp.insert("employee_sign", query.value(2).toString());
+		emp.insert("picture", query.value(3).toString());
+		emp.insert("departmentID", query.value(4).toInt());
+
+		employees.append(emp);
+	}
+
+	// 打包 tab_department 全量表（无过滤）
+	QJsonArray department;
+
+	query.prepare("SELECT `departmentID`, `department_name`, `sign`, `picture` FROM `tab_department`");
+	query.exec();
+	while (query.next() == true) {
+		QJsonObject dep;
+		dep.insert("departmentID", query.value(0).toInt());
+		dep.insert("department_name", query.value(1).toString());
+		dep.insert("sign", query.value(2).toString());
+		dep.insert("picture", query.value(3).toString());
+	
+		department.append(dep);
+	}
+
+	// 数组挂到 root 对象的 key 下
+	QJsonObject root;
+	root.insert("tab_employees", employees);
+	root.insert("tab_department", department);
+
+	// Document 打包成 QByteArray（网络发送的形态）
+	QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);		// Compact = 压缩无空格（省流量）
+	
+	qDebug() << QStringLiteral("[Snapshot] 通讯录快照已打包：%1名员工 / %2个部门").arg(employees.size()).arg(department.size());
+	return bytes;
 }
 
 void TcpServer::sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target) {

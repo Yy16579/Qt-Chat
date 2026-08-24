@@ -10,7 +10,6 @@
 #include <QScreen>
 
 
-
 BasicWindow::BasicWindow(QWidget *parent)
 	: QDialog(parent)
 {

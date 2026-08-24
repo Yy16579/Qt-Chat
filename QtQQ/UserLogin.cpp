@@ -5,9 +5,6 @@
 #include "TalkSessionStore.h"
 
 #include <QMessageBox>
-#include <QSqlDatabase>
-#include <QSqlQuery>
-#include <QSqlError>
 #include <QDebug>
 #include <QSettings>
 
@@ -35,12 +32,6 @@ UserLogin::~UserLogin()
 }
 
 void UserLogin::initControl() {
-	//连接数据库
-	if (this->connectMySql() == false) {
-		QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("连接数据库失败！"));
-		QApplication::quit();
-		return;
-	}
 
 	//设置登录界面用户头像
 	QLabel* headlabel = new QLabel(this);
@@ -72,30 +63,6 @@ void UserLogin::initTcpConnect() {
 
 	//通过 TcpClient 单例向服务端发起连接
 	TcpClient::getInstance().connectToServer();
-}
-
-bool UserLogin::connectMySql() {	
-	//从 config.ini 配置文件的 [Database] 节读取连接参数
-	QSettings settings(CommonUtils::getConfigPath(), QSettings::IniFormat);
-
-
-	//向数据库发起连接
-	//对应  C API  --------  mysql_init();
-	//			   --------  mysql_real_connect();
-	QSqlDatabase db = QSqlDatabase::addDatabase("QMYSQL");
-	db.setHostName(settings.value("Database/host").toString());
-	db.setPort(settings.value("Database/port").toInt());
-	db.setUserName(settings.value("Database/userName").toString());
-	db.setPassword(settings.value("Database/password").toString());
-	db.setDatabaseName(settings.value("Database/databaseName").toString());
-	
-	if (db.open()) {
-		return true;
-	}
-	else {
-		qWarning() << "MySQL connect failed:" << db.lastError().text();
-		return false;
-	}
 }
 
 

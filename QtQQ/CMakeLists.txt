@@ -88,6 +88,8 @@ set(PROJECT_SOURCES
     MsgWebView.cpp
     TcpClient.h
     TcpClient.cpp
+    ContactBook.h
+    ContactBook.cpp
     Protocol.h
 
 )
@@ -144,19 +146,4 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             "$<TARGET_FILE:${PROJECT_NAME}>"
     COMMENT "Running windeployqt to deploy Qt runtime dependencies"
 )
-
-# ========== 复制 MySQL 客户端运行库 ==========
-# qsqlmysql.dll 运行时依赖 libmysql.dll，windeployqt 不会自动复制（非 Qt 自带 DLL）
-set(_mysql_dll "C:/Program Files/MySQL/MySQL Server 8.0/lib/libmysql.dll")
-if(EXISTS "${_mysql_dll}")
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_mysql_dll}"
-            "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
-        COMMENT "Copying libmysql.dll to output directory"
-    )
-else()
-    message(WARNING "libmysql.dll not found at ${_mysql_dll}, "
-                    "MySQL connection will fail at runtime")
-endif()
 

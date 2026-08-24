@@ -1,12 +1,12 @@
 #include "MsgWebView.h"
 #include "WindowManager.h"
+#include "ContactBook.h"
 
 #include <QFile>
 #include <QMessageBox>
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QWebChannel>
-#include <QSqlQuery>
 #include <QPixmap>
 #include <QBuffer>
 
@@ -46,17 +46,10 @@ void MsgHtmlObj::initHtmlTmpl()
 	m_msgLHtmlTmpl.replace("%1", toDataUri(m_msgLPicPath));
 
 	// 初始化 右侧
-	// 通过 WindowManager 获取当前登录用户 empID，再查数据库拿头像路径
+	// 通过 WindowManager 获取当前登录用户 empID，查 ContactBook 缓存拿头像路径
 	m_msgRHtmlTmpl = getMsgtmplHtml("msgrightTmpl");
 	int empID = WindowManager::getInstance().m_empID;
-	QString msgRPicPath;
-	QSqlQuery query;
-	query.prepare("SELECT `picture` FROM `tab_employees` WHERE `employeeID` = ?");
-	query.addBindValue(empID);
-	query.exec();
-	if (query.next()) {
-		msgRPicPath = query.value(0).toString();
-	}
+	QString msgRPicPath = ContactBook::getInstance().employeeInfo(empID).picture;
 	// 同左侧，转成 base64 data URI
 	m_msgRHtmlTmpl.replace("%1", toDataUri(msgRPicPath));
 
@@ -129,47 +122,20 @@ void MsgWebView::init(int talkUid, bool isGroupTalk) {
 	//注册消息发送者对应的头像模板对象
 	//JS 侧通过 external_<uid>.msgLHtmlTmpl 取"该发送者头像"的左侧气泡模板
 
-	//查询数据库用的头像路径
-	QString picPath;
-	QSqlQuery query;
-
 	if (isGroupTalk == false) {
-		//单聊：只注册对方（对端用户）的头像模板
-		query.prepare("SELECT `picture` FROM `tab_employees` WHERE `employeeID` = ?");
-		query.addBindValue(talkUid);
-		query.exec();
-		if (query.next()) {
-			picPath = query.value(0).toString();
-		}
+		//单聊：查 ContactBook 缓存拿对方头像路径，注册对方的头像模板
+		QString picPath = ContactBook::getInstance().employeeInfo(talkUid).picture;
 		this->m_channel->registerObject(QString("external_%1").arg(talkUid), new MsgHtmlObj(this, picPath));
 	}
 	else {
 		//群聊：注册全部群成员的头像模板（收到谁的消息就用谁的模板显示）
-		//公司群 = 所有在职员工；部门群 = 该部门在职员工
-		int compDepID = -1;
-		query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
-		query.addBindValue(QStringLiteral("公司群"));
-		query.exec();
-		if (query.next()) {
-			compDepID = query.value(0).toInt();
-		}
-
-		if (talkUid == compDepID) {
-			//公司群：查询所有在职员工
-			query.prepare("SELECT `employeeID`, `picture` FROM `tab_employees` WHERE `status` = ?");
-			query.addBindValue(1);
-		}
-		else {
-			//部门群：查询该部门在职员工
-			query.prepare("SELECT `employeeID`, `picture` FROM `tab_employees` WHERE `status` = ? AND `departmentID` = ?");
-			query.addBindValue(1);
-			query.addBindValue(talkUid);
-		}
-		query.exec();
-		while (query.next()) {
+		//公司群/部门群的成员过滤由 ContactBook::groupMembers 内部消化
+		QList<int> members = ContactBook::getInstance().groupMembers(talkUid);
+		for (int memberId : members) {
+			QString picPath = ContactBook::getInstance().employeeInfo(memberId).picture;
 			this->m_channel->registerObject(
-				QString("external_%1").arg(query.value(0).toInt()),
-				new MsgHtmlObj(this, query.value(1).toString()));
+				QString("external_%1").arg(memberId),
+				new MsgHtmlObj(this, picPath));
 		}
 	}
 

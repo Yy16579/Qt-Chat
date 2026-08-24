@@ -39,8 +39,8 @@ private:
 	// ======================================================================================================
 
 private:
-	// 离线消息推送
-	void pushOfflineMessages(int uid, TcpSocket* socket);
+	void pushOfflineMessages(int uid, TcpSocket* socket);		// 离线消息推送
+	QByteArray buildContactSnapshot();			// 打包通讯录快照 JSON（登录成功时随 LoginResponse 下发）
 
 private:
 	// 数据包 包头拼接与发送

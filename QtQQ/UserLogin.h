@@ -18,8 +18,6 @@ private:
 	void initControl();
 	void initTcpConnect();		//初始化网络连接
 
-	bool connectMySql();		//初始化数据库连接
-
 private slots:
 	//槽函数
 	void onLoginBtnClicked();

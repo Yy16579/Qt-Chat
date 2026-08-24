@@ -22,7 +22,6 @@ public:
 private:
 	void initControl();
 	void initGroupStatus();
-	int getCompDepID();
 	void initGroupTalk();		//初始化群聊
 	void initPTOPTalk();		//初始化单聊
 	void addPeopleItem(QTreeWidgetItem* pRootGroupItem, int empID);		//联系人树 添加联系人子项

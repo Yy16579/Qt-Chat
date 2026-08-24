@@ -4,9 +4,9 @@
 #include "CommonUtils.h"
 #include "WindowManager.h"
 #include "TcpClient.h"
+#include "ContactBook.h"
 
 #include <QToolTip>
-#include <QSqlQuery>
 
 
 TalkWindow::TalkWindow(QWidget* parent, const int& uid)
@@ -78,12 +78,9 @@ void TalkWindow::initControl() {
 }
 
 void TalkWindow::initGroupStatus() {
-	//查询数据库，根据窗口 uid 判断是否为群聊 
-	QSqlQuery query;
-	query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `departmentID` = ?");
-	query.addBindValue(this->m_talkId);
-	query.exec();
-	if (query.next() == true) {
+	//查 ContactBook 缓存，根据窗口 uid 判断是否为群聊 
+	bool isGroup = ContactBook::getInstance().isGroup(this->m_talkId);
+	if (isGroup == true) {
 		//为群聊
 		this->m_isGroupTalk = true;
 	}
@@ -91,16 +88,6 @@ void TalkWindow::initGroupStatus() {
 		//为单聊
 		this->m_isGroupTalk = false;
 	}
-}
-
-int TalkWindow::getCompDepID() {
-	//查询数据库，获取 公司群 departmentID
-	QSqlQuery query;
-	query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
-	query.addBindValue(QStringLiteral("公司群"));
-	query.exec();
-	query.next();
-	return query.value(0).toInt();
 }
 
 void TalkWindow::initGroupTalk() {
@@ -113,36 +100,14 @@ void TalkWindow::initGroupTalk() {
 	pRootItem->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
 	pRootItem->setData(0, Qt::UserRole, 0);        //根项 key = <0, Qt::UserRole>,  value = 0
 
-	//查询数据库，根据 uid 获取 department_name
-	QSqlQuery query;
-	query.prepare("SELECT `department_name` FROM `tab_department` WHERE `departmentID` = ?");
-	query.addBindValue(this->m_talkId);
-	query.exec();
-	query.next();
-	QString groupName = query.value(0).toString();
+	//查 ContactBook 缓存，根据 uid 获取 department_name
+	DepartmentInfo depInfo = ContactBook::getInstance().departmentInfo(this->m_talkId);
+	QString groupName = depInfo.name;
 
-	//查询数据库，根据 departmentID 获取所有该群成员 employeeID
-	QList<int> employeeIDs;
-	int nEmployeeNum = 0;
-	if (this->m_talkId == this->getCompDepID()) {
-		//若为 公司群 ，则查询所有群的成员 employeeID
-		query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ?");
-		query.addBindValue(1);
-		query.exec();
-	}
-	else {
-		//不为 公司群，则查询对应群的成员 employeeID
-		query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ? AND `departmentID` = ?");
-		query.addBindValue(1);
-		query.addBindValue(this->m_talkId);
-		query.exec();
-	}
-	//将结果集存储起来，避免后续被破坏
-	while (query.next() == true) {
-		employeeIDs << query.value(0).toInt();
-	}
-	nEmployeeNum = query.size();
-
+	//查 ContactBook 缓存，根据 departmentID 获取所有该群成员 employeeID
+	QList<int> employeeIDs = ContactBook::getInstance().groupMembers(this->m_talkId);
+	int nEmployeeNum = employeeIDs.size();
+	
 	//创建根项贴纸，设置贴纸信息
 	RootContactItem* pItemName = new RootContactItem(false, ui.treeWidget);
 	QString text = QStringLiteral("%1 %2/%3").arg(groupName).arg(0).arg(nEmployeeNum);
@@ -182,16 +147,12 @@ void TalkWindow::addPeopleItem(QTreeWidgetItem* pRootGroupItem, int empID) {
 	pChild->setData(0, Qt::UserRole + 1, empID);     //单聊 key <0, Qt::UserRole + 1>, value = empID
 
 
-	//查询数据库，根据 employeeID 获取对应的 picture , name , sign
-	QSqlQuery query;
-	query.prepare("SELECT `picture`, `employee_name`, `employee_sign` FROM `tab_employees` WHERE `employeeID` = ?");
-	query.addBindValue(empID);
-	query.exec();
-	query.next();
+	//查 ContactBook 缓存，根据 employeeID 获取对应的 picture , name , sign
+	EmployeeInfo empInfo = ContactBook::getInstance().employeeInfo(empID);
 	QPixmap peoplePix;
-	peoplePix.load(query.value(0).toString());
-	QString peopleName = query.value(1).toString();
-	QString peopleSign = query.value(2).toString();
+	peoplePix.load(empInfo.picture);
+	QString peopleName = empInfo.name;
+	QString peopleSign = empInfo.sign;
 
 	//创建子项贴纸，设置贴纸信息
 	ContactItem* pContactItem = new ContactItem(ui.treeWidget);

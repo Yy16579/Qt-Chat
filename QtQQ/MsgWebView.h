@@ -3,7 +3,7 @@
 #include <QWebEngineView>
 #include <QDomNode>
 #include <QDomText>
-#include <QURL>
+#include <QUrl>
 
 
 //============================================= MsgHtmlObj（数据管家）=================================================

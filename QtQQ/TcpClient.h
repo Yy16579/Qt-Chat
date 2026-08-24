@@ -11,8 +11,8 @@
 // 断线意图
 enum class DisconnectIntent {
 	None,       //意外断线（服务端崩溃/网络故障/心跳超时abort）→ 触发自动重连
-	Logout,     //用户主动登出 → 不重连（凭据清除，回登录页）
-	KickOut     //被踢下线 → 不重连（防"重连→重登→再踢"死循环）
+	Logout,     //用户主动登出 → 不重连
+	KickOut     //被踢下线 → 不重连
 };
 
 

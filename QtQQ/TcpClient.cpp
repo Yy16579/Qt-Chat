@@ -1,5 +1,6 @@
 #include "TcpClient.h"
 #include "CommonUtils.h"
+#include "ContactBook.h"
 
 #include <QSettings>
 #include <QHostAddress>
@@ -445,6 +446,12 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 
 			//成功登录
 			this->m_loggedIn = true;
+
+			//提取通讯录快照：6字节定长头（结果1B+uid5B）之后的附加数据
+			//必须先填缓存再 emit——emit 后 UserLogin 会立即 new CCMainWindow 查询缓存
+			if (dataBody.size() > 6) {
+				ContactBook::getInstance().loadFromJson(dataBody.mid(6));
+			}
 		}
 
 		//解析完成，发射信号交给 UI 层（UserLogin）处理界面跳转

@@ -8,14 +8,13 @@
 #include "TcpClient.h"
 #include "TalkSessionStore.h"
 #include "UserLogin.h"
+#include "ContactBook.h"
 
 #include <QProxyStyle>
 #include <QPainter>
 #include <QTimer>
 #include <QMouseEvent>
 #include <QApplication>
-#include <QSqlQuery>
-#include <QSqlError>
 #include <QMessageBox>
 
 
@@ -142,16 +141,12 @@ void CCMainWindow::initTimer() {
 
 void CCMainWindow::initUserInfo() {
     //查询数据库，根据用户 employeeID 获取用户信息
-    QSqlQuery query;
-    query.prepare("SELECT `employee_name`, `employee_sign`, `picture` FROM `tab_employees` WHERE `employeeID` = ?");
-    query.addBindValue(this->m_empID);
-    query.exec();
-    query.next();
+    EmployeeInfo empInfo = ContactBook::getInstance().employeeInfo(this->m_empID);
 
-    QString username = query.value(0).toString();
+    QString username = empInfo.name;
     this->setProperty("username", username);		//存入动态属性，供 resizeEvent 取用，避免硬编码
     this->setUserName(username);
-    this->setHeadPixmap(query.value(2).toString());
+    this->setHeadPixmap(empInfo.picture);
     this->setLevelPixmap(12);
     this->setStatusMenuIcon(":/Resources/MainWindow/StatusSucceeded.png");
 }
@@ -174,15 +169,12 @@ void CCMainWindow::addGroupItem(QTreeWidgetItem* pRootGroupItem, int depID) {
     pChild->setData(0, Qt::UserRole + 1, depID);     //群聊 key <0, Qt::UserRole + 1>, value = depID
 
 
-    //查询数据库，根据 departmentID 获取对应的 picture , name
-    QSqlQuery query;
-    query.prepare("SELECT `picture`, `department_name` FROM `tab_department` WHERE `departmentID` = ?");
-    query.addBindValue(depID);
-    query.exec();
-    query.next();
+    //查查 ContactBook 缓存，根据 departmentID 获取对应的 picture , name
+    DepartmentInfo depInfo = ContactBook::getInstance().departmentInfo(depID);
+
     QPixmap groupPix;
-    groupPix.load(query.value(0).toString());
-    QString groupName = query.value(1).toString();
+    groupPix.load(depInfo.picture);
+    QString groupName = depInfo.name;
     
     //创建子项贴纸，设置贴纸信息
     ContactItem* pContactItem = new ContactItem(ui.treeWidget);
@@ -306,20 +298,9 @@ void CCMainWindow::initContactTree() {
     ui.treeWidget->setItemWidget(pRootGroupItem, 0, pItemName);
 
 
-    //查询数据库，根据用户 employeeID 获取对应 departmentID
-    QSqlQuery query;
-    query.prepare("SELECT `departmentID` FROM `tab_employees` WHERE `employeeID` = ?");
-    query.addBindValue(this->m_empID);
-    query.exec();
-    query.next();
-    int SelfDepID = query.value(0).toInt();
-
-    //查询数据库，获取公司群 departmentID
-    query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
-    query.addBindValue(QStringLiteral("公司群"));
-    query.exec();
-    query.next();
-    int CompDepID = query.value(0).toInt();
+    //查 ContactBook 缓存，根据用户 employeeID 获取 departmentID
+    int SelfDepID = ContactBook::getInstance().selfDepID(this->m_empID);
+    int CompDepID = ContactBook::getInstance().compDepID();
 
     //添加子项，将用户 部门群 和 公司群 添加上去
     this->addGroupItem(pRootGroupItem, SelfDepID);
