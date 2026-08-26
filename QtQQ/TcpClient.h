@@ -25,13 +25,14 @@ public:
 	static TcpClient& getInstance();
 
 	void connectToServer();			//创建套接字，向服务端发起连接
+	bool isConnected() const;		//连接状态查询
 
 public:
 	// 数据包打包发送接口 ===================================================================================
 	// 拼接内部数据
 	// ===== 消息类接口 =====
-	// 发送消息包
-	void sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file = "");
+	// 发送消息包（返回 false = 发送失败：未连接/消息过长，调用方据此决定是否入本地仓库）
+	bool sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file = "");
 
 	// ===== 认证类接口 =====
 	// 发送登录请求
@@ -50,7 +51,7 @@ public:
 	// ===== 状态类接口 =====
 	// 发送心跳包
 	void sendHeartbeat();
-
+	
 private:
 	// 拼接包头并发送（所有上层接口最终调用这个）
 	void sendPacket(quint16 packetType, const QByteArray& dataBody);

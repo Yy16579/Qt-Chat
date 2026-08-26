@@ -150,7 +150,12 @@ void TcpClient::connectToServer() {
 	this->m_tcpClientSocket->connectToHost(QHostAddress(host), port);
 }
 
-void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file) {
+bool TcpClient::isConnected() const {
+	//socket 存在且处于已连接状态才算在线（ConnectingState 等中间态不算）
+	return this->m_tcpClientSocket && this->m_tcpClientSocket->state() == QAbstractSocket::ConnectedState;
+}
+
+bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file) {
 	// 拼接内层（群标识 + 发送方ID + 接收方ID + 消息类型 + 消息内容）
 	
 	//接收到的参数：
@@ -178,7 +183,7 @@ void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 	//先检查 socket 状态
 	if (!m_tcpClientSocket || m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
 		emit signalErrorOccurred(QStringLiteral("未连接到服务器"));
-		return;
+		return false;
 	}
 
 	//拼接内部数据
@@ -210,7 +215,7 @@ void TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 		int dataLength = msg.toUtf8().size();
 		if (dataLength > 60000) {
 			emit signalErrorOccurred(QStringLiteral("消息过长"));
-			return;
+			return false;
 		}
 		QString strDataLength = QString::number(dataLength).rightJustified(5, '0');
 

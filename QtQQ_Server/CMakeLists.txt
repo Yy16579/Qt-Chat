@@ -17,7 +17,6 @@ find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core)
 find_package(Qt${QT_VERSION_MAJOR}
     COMPONENTS
         Core
-        Widgets               # QDialog / QApplication 依赖
         Network               # QTcpServer / QTcpSocket / QUdpSocket 均依赖此模块
         Sql                   # 数据库访问
     REQUIRED
@@ -28,9 +27,8 @@ qt_standard_project_setup()
 set(PROJECT_SOURCES
     Protocol.h
     main.cpp
-    QtQQ_Server.h
-    QtQQ_Server.cpp
-    QtQQ_Server.ui
+    ServerTask.h
+    ServerTask.cpp
     TcpServer.h
     TcpServer.cpp
     TcpSocket.h
@@ -45,13 +43,9 @@ target_include_directories(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-#服务端是 GUI 程序（QDialog），设 WIN32_EXECUTABLE 隐藏控制台窗口
-set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
-
 target_link_libraries(${PROJECT_NAME}
     PUBLIC
         Qt::Core
-        Qt::Widgets
         Qt::Network
         Qt::Sql
 )

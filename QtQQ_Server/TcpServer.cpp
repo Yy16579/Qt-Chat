@@ -2,12 +2,7 @@
 
 #include <QDebug>
 #include <QtEndian>
-#include <QSqlQuery> 
-#include <QSqlError>
 #include <QDateTime>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonArray>
 
 
 TcpServer::TcpServer(int port)
@@ -19,18 +14,39 @@ TcpServer::TcpServer(int port)
 	connect(this->m_checkTimer, &QTimer::timeout, this, &TcpServer::onCheckTimeout);
 	this->m_checkTimer->start();
 
+	//初始化 DB 任务线程池：主线程只做 IO 和快业务，MySQL 慢查询全部外包给池
+	//（池线程常驻不过期：保证 DbConnPool"每线程一条连接"恒定复用，杜绝线程销毁后 tid 复用取到旧连接的竞态）
+	this->m_taskPool = new QThreadPool(this);
+	this->m_taskPool->setMaxThreadCount(4);		// 设置池线程数量
+	this->m_taskPool->setExpiryTimeout(-1);		// -1 池线程常驻不过期
+
+	//结果回传器：池线程 emit 信号 → 事件队列投递 → 下列结果槽在主线程执行（跨线程信号槽自动队列连接）
+	this->m_taskSignals = new TaskSignals(this);
+	connect(this->m_taskSignals, &TaskSignals::dbChecked, this, &TcpServer::onDbChecked);
+	connect(this->m_taskSignals, &TaskSignals::loginVerified, this, &TcpServer::onLoginVerified);
+	connect(this->m_taskSignals, &TaskSignals::groupMembersLoaded, this, &TcpServer::onGroupMembersLoaded);
+	connect(this->m_taskSignals, &TaskSignals::offlineLoaded, this, &TcpServer::onOfflineLoaded);
+
+	//启动自检：试连 MySQL，结果回主线程打印（fail-fast 提示；失败不终止——服务端降级运行）
+	this->m_taskPool->start(new DbCheckTask(this->m_taskSignals));
+
 	//注册业务表
 	this->registerHandlers();
 }
 
 TcpServer::~TcpServer()
 {
-	// 1. 断开所有客户端连接
+	// 1. 停池：丢弃排队中的任务，等待在跑的任务干完
+	//（任务持有 m_taskSignals 指针，必须先收工再让 QObject 父子树析构 TaskSignals）
+	this->m_taskPool->clear();
+	this->m_taskPool->waitForDone();
+
+	// 2. 断开所有客户端连接
 	for (TcpSocket* socket : m_fdSocketMap) {
 		socket->disconnectFromHost();
 	}
 
-	// 2. 清空映射表
+	// 3. 清空映射表
 	m_fdSocketMap.clear();
 	m_uidSocketMap.clear();
 }
@@ -99,21 +115,17 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 	if (groupFlag == 0) {
 		//为私聊
 		recvId = dataBody.mid(6, 5).toInt();
-		
+
 		// 查路由表精准转发（转发原包，服务端不关心载荷内容）
 		TcpSocket* targetSocket = this->m_uidSocketMap.value(recvId);
 		if (targetSocket != nullptr) {
-			//对方在线
+			//对方在线：主线程直接转发（零 DB，快业务）
 			targetSocket->write(fullPacket);
 			qDebug() << QStringLiteral("[Message] %1 → %2 转发成功").arg(sendId).arg(recvId);
 		}
 		else {
-			//对方不在线，将消息推送到离线表
-			QSqlQuery query;
-			query.prepare("INSERT INTO `tab_offline_msg` (`recv_id`, `content`) VALUES (?, ?)");
-			query.addBindValue(recvId);
-			query.addBindValue(dataBody);
-			query.exec();
+			//对方不在线：入库暂存外包给池（fire-and-forget，主线程不等待 INSERT 完成）
+			this->m_taskPool->start(new InsertOfflineTask(recvId, dataBody));
 			qDebug() << QStringLiteral("[Offline] uid=%1 离线，消息入库暂存").arg(recvId);
 		}
 	}
@@ -121,61 +133,9 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 		//为群聊：recvId 为 4 位群号（即 departmentID）
 		recvId = dataBody.mid(6, 4).toInt();
 
-		// 1. 查询群成员列表：
-		QList<int> memberIds;
-		QSqlQuery query;
-
-		query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
-		query.addBindValue(QStringLiteral("公司群"));
-		query.exec();
-		query.next();
-		int compDepID = query.value(0).toInt();
-
-		if (recvId == compDepID) {
-			//公司群：查全部在职员工
-			query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ?");
-			query.addBindValue(1);
-		}
-		else {
-			//普通群：查该部门在职员工
-			query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ? AND `departmentID` = ?");
-			query.addBindValue(1);
-			query.addBindValue(recvId);
-		}
-		query.exec();
-
-		//结果集先取出存列表（QSqlQuery 单结果集遍历，防止后续复用被破坏）
-		while (query.next() == true) {
-			memberIds << query.value(0).toInt();
-		}
-
-		// 2. 逐成员分发（跳过发送者本人：其客户端已本地入库+显示，回发会造成重复）
-		int onlineCount = 0;
-		int offlineCount = 0;
-		for (int memberId : memberIds) {
-			if (memberId == sendId) {
-				continue;
-			}
-
-			TcpSocket* targetSocket = this->m_uidSocketMap.value(memberId);
-			if (targetSocket != nullptr) {
-				//该成员在线：转发原包
-				targetSocket->write(fullPacket);
-				onlineCount++;
-			}
-			else {
-				//该成员离线：入离线表（上线时由 pushOfflineMessages 补发）
-				QSqlQuery insertQuery;
-				insertQuery.prepare("INSERT INTO `tab_offline_msg` (`recv_id`, `content`) VALUES (?, ?)");
-				insertQuery.addBindValue(memberId);
-				insertQuery.addBindValue(dataBody);
-				insertQuery.exec();
-				offlineCount++;
-			}
-		}
-
-		qDebug() << QStringLiteral("[GroupMessage] 群%1（%2人）：在线转发%3，离线暂存%4")
-			.arg(recvId).arg(memberIds.size()).arg(onlineCount).arg(offlineCount);
+		//群成员查询外包给池：主线程不挂起等待（会阻塞其他客户端），
+		//原包 fullPacket/dataBody 随任务往返（查询期间消息"在途"），查完回 onGroupMembersLoaded 分发
+		this->m_taskPool->start(new GroupMembersTask(descriptor, sendId, recvId, fullPacket, dataBody, this->m_taskSignals));
 	}
 }
 
@@ -192,110 +152,9 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 	QString account = QString::fromUtf8(fields.at(0));		//账号
 	QString password = QString::fromUtf8(fields.at(1));		//密码
 
-	// 2. 查询数据库验证（双方式登录）
-	QString result = "0";		//结果标志：'1'成功 '0'失败
-	QString empID = "";			//用户 employeeID（成功时有效）
-	bool found = false;			//是否查到账号记录
-
-	//账号为纯数字时，才按 employeeID 查询（int 列绑定数字，避免字符串隐式转换）
-	bool isNumber = false;
-	int accountNum = account.toInt(&isNumber);
-
-	QSqlQuery query;
-	if (isNumber) {
-		//方式一：按 employeeID 查询
-		query.prepare("SELECT `code` FROM `tab_accounts` WHERE `employeeID` = ?");
-		query.addBindValue(accountNum);
-		query.exec();
-		found = query.next();
-
-		if (found == true && query.value(0).toString() == password) {
-			//密码正确
-			result = "1";
-			empID = QString::number(accountNum);
-		}
-		//employeeID 未命中记录 → 继续方式二
-	}
-
-	if (found == false) {
-		//方式二：按 account 字段查询（账号非数字，或方式一未命中记录）
-		query.prepare("SELECT `code`, `employeeID` FROM `tab_accounts` WHERE `account` = ?");
-		query.addBindValue(account);
-		query.exec();
-		if (query.next() == true) {
-			found = true;
-			if (query.value(0).toString() == password) {
-				//密码正确
-				result = "1";
-				empID = query.value(1).toString();
-			}
-		}
-	}
-
-	// 3. 回发登录响应包
-	//格式：成功 = 结果标志1B + uid5B（客户端按 mid(1,5) 定长解析，uid 不足5位需补零）；失败 = "0"
-	QByteArray body;
-	if (result == "1") {
-		body.append(result.toUtf8());
-		body.append(empID.rightJustified(5, '0').toUtf8());
-		qDebug() << QStringLiteral("[LoginRequest] fd=%1 登录成功，uid=%2").arg(descriptor).arg(empID);
-
-		//登录成功 → 追加通讯录快照（首登/静默重登/互踢后重登，所有路径统一在此刷新）
-		QByteArray snapshot = this->buildContactSnapshot();
-
-		//长度兜底：外层长度字段 quint16（包类型2B+长度2B），超限退化为不带快照的原格式（登录仍可用）
-		if (body.size() + snapshot.size() <= 65528) {
-			body.append(snapshot);
-		}
-		else {
-			qWarning() << QStringLiteral("[LoginRequest] 通讯录快照过大（%1B），本次登录不携带")
-				.arg(snapshot.size());
-		}
-	}
-	else {
-		body = result.toUtf8();
-		qDebug() << QStringLiteral("[LoginRequest] fd=%1 账号密码验证失败").arg(descriptor);
-	}
-	this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, this->m_fdSocketMap.value(descriptor));
-
-	// 4. 若成功登录，添加至路由表，推送离线消息
-	if (result == "1") {
-		int uid = empID.toInt();
-		TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
-
-		if (this->m_uidSocketMap.contains(uid) == true) {
-			// 路由表中存在登录记录
-			// 重复登录：发送 KickOut 包再断开连接
-			TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
-
-			if (oldSocket == socket) {
-				//推送离线消息
-				this->pushOfflineMessages(uid, socket);
-				return;
-			}
-
-			//1. 发送 KickOut 包：旧客户端收到 KickOut 包后退出登录
-			this->sendPacket(static_cast<quint16>(PacketType::KickOut), QByteArray(), oldSocket);
-
-			//2. 立即冲刷发送缓冲，确保 KickOut 包先于断开动作发出，不被丢弃
-			oldSocket->flush();
-
-			//3. 断开旧连接（异步，稍后由 onClientDisconnected 完成清理）
-			oldSocket->disconnectFromHost();
-		}
-
-		// 同连接切换账号：先移除本连接旧 uid 的映射，避免路由表残留悬空指针
-		int oldUid = socket->getUid();
-		if (oldUid != -1 && oldUid != uid) {
-			this->m_uidSocketMap.remove(oldUid);
-		}
-
-		socket->setUid(uid);				//设置 socket 的 uid 字段
-		this->m_uidSocketMap.insert(uid, socket);	//添加至路由表
-
-		//推送离线消息
-		this->pushOfflineMessages(uid, socket);
-	}
+	// 2. 验证 + 快照打包外包给池（最重的 DB 业务：最多 5 条 SQL + JSON 序列化）
+	//结果（成败/uid/快照字节）经 TaskSignals 回 onLoginVerified，由主线程拼响应/互踢/绑路由
+	this->m_taskPool->start(new LoginTask(descriptor, account, password, this->m_taskSignals));
 }
 
 void TcpServer::handleLogout(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
@@ -330,84 +189,6 @@ void TcpServer::handleDbQuery(const QByteArray& fullPacket, const QByteArray& da
 void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
 	// 收到心跳包，回发心跳响应
 	this->sendPacket(static_cast<quint16>(PacketType::HeartbeatResponse), QByteArray(), m_fdSocketMap.value(descriptor));
-}
-
-void TcpServer::pushOfflineMessages(int uid, TcpSocket* socket) {
-	//推送该用户全部离线消息：逐条 发送→删除
-
-	QSqlQuery query;
-	query.prepare("SELECT `id`, `content` FROM `tab_offline_msg` WHERE `recv_id` = ? ORDER BY `id` ASC");
-	query.addBindValue(uid);
-	query.exec();
-
-	int count = 0;
-	while (query.next() == true) {
-		int msgId = query.value(0).toInt();
-		QByteArray content = query.value(1).toByteArray();
-
-		//直接把存的 dataBody 原文作为 Message 包发送（零转换，客户端当普通消息处理）
-		this->sendPacket(static_cast<quint16>(PacketType::Message), content, socket);
-
-		//推送一条删除一条
-		QSqlQuery delQuery;
-		delQuery.prepare("DELETE FROM `tab_offline_msg` WHERE `id` = ?");
-		delQuery.addBindValue(msgId);
-		delQuery.exec();
-		count++;
-	}
-
-	if (count > 0) {
-		qDebug() << QStringLiteral("[Offline] uid=%1 登录，已推送 %2 条离线消息").arg(uid).arg(count);
-	}
-}
-
-QByteArray TcpServer::buildContactSnapshot() {
-	//通讯录快照打包：两张表全量 → 紧凑 JSON
-	//调用时机：登录认证成功后随 LoginResponse 下发，客户端 ContactBook 缓存的数据源
-	
-	// 打包 tab_employees 全量表（过滤 status = 0 的用户）
-	QJsonArray employees;
-	
-	QSqlQuery query;
-	query.prepare("SELECT `employeeID`, `employee_name`, `employee_sign`, `picture`, `departmentID` FROM `tab_employees` WHERE `status` = ?");
-	query.addBindValue(1);
-	query.exec();
-	while (query.next() == true) {
-		QJsonObject emp;
-		emp.insert("employeeID", query.value(0).toInt());
-		emp.insert("employee_name", query.value(1).toString());
-		emp.insert("employee_sign", query.value(2).toString());
-		emp.insert("picture", query.value(3).toString());
-		emp.insert("departmentID", query.value(4).toInt());
-
-		employees.append(emp);
-	}
-
-	// 打包 tab_department 全量表（无过滤）
-	QJsonArray department;
-
-	query.prepare("SELECT `departmentID`, `department_name`, `sign`, `picture` FROM `tab_department`");
-	query.exec();
-	while (query.next() == true) {
-		QJsonObject dep;
-		dep.insert("departmentID", query.value(0).toInt());
-		dep.insert("department_name", query.value(1).toString());
-		dep.insert("sign", query.value(2).toString());
-		dep.insert("picture", query.value(3).toString());
-	
-		department.append(dep);
-	}
-
-	// 数组挂到 root 对象的 key 下
-	QJsonObject root;
-	root.insert("tab_employees", employees);
-	root.insert("tab_department", department);
-
-	// Document 打包成 QByteArray（网络发送的形态）
-	QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);		// Compact = 压缩无空格（省流量）
-	
-	qDebug() << QStringLiteral("[Snapshot] 通讯录快照已打包：%1名员工 / %2个部门").arg(employees.size()).arg(department.size());
-	return bytes;
 }
 
 void TcpServer::sendPacket(quint16 packetType, const QByteArray& dataBody, TcpSocket* target) {
@@ -540,6 +321,105 @@ void TcpServer::onCheckTimeout() {
 		// 这些可能还躺在发送缓冲里没被对方 ACK。如果用 abort，这些数据直接扔了；
 		// 用 disconnectFromHost，TCP 会尽力重传投递（对端若只是网络抖动真还活着，数据能到）。
 		socket->disconnectFromHost();		//触发现有 onClientDisconnected 清理链
+	}
+}
+
+void TcpServer::onDbChecked(bool ok, const QString& error) {
+	//启动自检结果：成功打印就绪；失败打印错误（降级运行，不终止——MySQL 恢复后首个任务会重建连接）
+
+	if (ok == true) {
+		qDebug() << QStringLiteral("[DbCheck] 数据库连接自检通过，服务端就绪");
+	}
+	else {
+		qWarning() << QStringLiteral("[DbCheck] 数据库连接失败（服务端降级运行）：%1").arg(error);
+	}
+}
+
+void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot) {
+	//LoginTask 结果处理：拼响应 / 互踢 / 绑路由 / 触发离线拉取
+	//（DB 验证和快照打包已在池线程完成，此处只做发包和内存路由操作）
+
+	// 0. 竞态防护：验证在途期间（MySQL 慢）客户端可能已断开，结果作废
+	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
+	if (socket == nullptr) {
+		qDebug() << QStringLiteral("[Login] fd=%1 验证完成但连接已断开，结果作废").arg(descriptor);
+		return;
+	}
+
+	// 1. 验证失败：回发失败标志
+	if (ok == false) {
+		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), "0", socket);
+		return;
+	}
+
+	// 2. 互踢：该 uid 已有旧连接在线 → 通知旧客户端 + 断开旧连接
+	//（客户端收到 KickOut 后置断线意图为"被踢"，不再自动重连，直接回登录界面）
+	TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
+	if (oldSocket != nullptr && oldSocket != socket) {
+		qDebug() << QStringLiteral("[KickOut] uid=%1 重复登录，踢除旧连接 fd=%2").arg(uid).arg(oldSocket->socketDescriptor());
+
+		this->sendPacket(static_cast<quint16>(PacketType::KickOut), QByteArray(), oldSocket);
+		oldSocket->disconnectFromHost();		//异步断开，稍后触发 onClientDisconnected（其中映射指向校验防误删新路由）
+	}
+
+	// 3. 绑定新连接路由：socket 记 uid，路由表 uid → socket
+	socket->setUid(uid);
+	this->m_uidSocketMap.insert(uid, socket);
+
+	// 4. 回发成功响应："1" + uid(5位定长) + 通讯录快照
+	//（格式与客户端解析对应：mid(1,5) 取 uid，mid(6) 起为快照 JSON）
+	QByteArray body = "1" + QString::number(uid).rightJustified(5, '0').toUtf8() + snapshot;
+	this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, socket);
+
+	// 5. 拉取离线消息：外包给池（结果回 onOfflineLoaded 逐条推送）
+	this->m_taskPool->start(new LoadOfflineTask(descriptor, uid, this->m_taskSignals));
+}
+
+void TcpServer::onGroupMembersLoaded(int descriptor, int sendId, int groupId, const QList<int>& memberIds,
+	const QByteArray& fullPacket, const QByteArray& dataBody) {
+	//GroupMembersTask 结果处理：逐成员分发（在线直转 / 离线入库）
+	//特例说明：不判空来源 socket——消息已到达服务端，发送者断线不影响其他成员收消息
+
+	int onlineCount = 0;		//在线直转计数
+	int offlineCount = 0;		//离线入库计数
+
+	for (int memberId : memberIds) {
+		//跳过发送者本人（自己的气泡由本地渲染，服务端不回发）
+		if (memberId == sendId) {
+			continue;
+		}
+
+		TcpSocket* memberSocket = this->m_uidSocketMap.value(memberId);
+		if (memberSocket != nullptr) {
+			//在线：转发原始包
+			memberSocket->write(fullPacket);
+			onlineCount++;
+		}
+		else {
+			//离线：入库暂存，等其下次登录推送（fire-and-forget）
+			this->m_taskPool->start(new InsertOfflineTask(memberId, dataBody));
+			offlineCount++;
+		}
+	}
+
+	qDebug() << QStringLiteral("[Group] 群%1 消息分发完成：%2人在线直转，%3人离线入库")
+		.arg(groupId).arg(onlineCount).arg(offlineCount);
+}
+
+void TcpServer::onOfflineLoaded(int descriptor, int uid, const QList<QByteArray>& contents) {
+	//LoadOfflineTask 结果处理：逐条推送离线消息
+	//（消息已在池线程删除完毕；此处只管发包——若推送前用户又断线，这批消息会丢，方案已确认接受）
+
+	//竞态防护：拉取在途期间客户端可能已断开，结果作废
+	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
+	if (socket == nullptr) {
+		qDebug() << QStringLiteral("[Offline] fd=%1 离线消息就绪但连接已断开，放弃推送").arg(descriptor);
+		return;
+	}
+
+	//逐条推送（存的是 dataBody 原文，此处重新封 Message 包头）
+	for (const QByteArray& content : contents) {
+		this->sendPacket(static_cast<quint16>(PacketType::Message), content, socket);
 	}
 }
 

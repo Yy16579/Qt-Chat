@@ -223,9 +223,15 @@ void TalkWindow::replayHistory() {
 void TalkWindow::onMsgSend(const QString& msg, int msgType, const QString file) {
 	//向服务端发送消息数据
 	int sendID = WindowManager::getInstance().m_empID;
-	TcpClient::getInstance().sendMessage(this->m_isGroupTalk, sendID, this->m_talkId, msgType, msg, file);
 
-	//自己发的消息同步入会话仓库
+	//发送失败（未连接/消息过长）直接返回，不入本地仓库：
+	//否则断线期间的消息会被存库，重启后重放成"已发送"，实际对方从未收到（假发送）
+	//正常流程 onSendBtnClicked 已做连接预检，此处是兜底（预检后瞬间断线、消息超长等场景）
+	if (!TcpClient::getInstance().sendMessage(this->m_isGroupTalk, sendID, this->m_talkId, msgType, msg, file)) {
+		return;
+	}
+
+	//自己发的消息同步入会话仓库（仅发送成功才入库）
 	MsgRecord record;
 	record.groupFlag = this->m_isGroupTalk ? 1 : 0;
 	record.sendId = sendID;
@@ -278,10 +284,17 @@ void TalkWindow::onSendBtnClicked() {
 		return;
 	}
 
+	//连接预检：断线期间不渲染气泡、不清空输入（防止"假发送"：气泡显示了但消息没出网）
+	//此处拦截走静默气泡提示；sendMessage 内部还有二次兜底（返回 false 则不入库）
+	if (!TcpClient::getInstance().isConnected()) {
+		QToolTip::showText(this->mapToGlobal(QPoint(630, 660)), QStringLiteral("未连接到服务器，消息未发送！"), this, QRect(0, 0, 120, 100), 2000);
+		return;
+	}
+
 	// 消息编辑窗口不为空，将对话框消息转换为 html 格式
 	QString html = ui.textEdit->document()->toHtml();
 
-	// 清除消息编辑窗口的所有消息
+	// 清除消息编辑窗口的所有消息（前置校验全部通过，此时清空才不会丢内容）
 	ui.textEdit->clear();
 	ui.textEdit->deleteAllEmotionImage();
 
