@@ -27,7 +27,7 @@ TcpServer::TcpServer(int port)
 	connect(this->m_taskSignals, &TaskSignals::groupMembersLoaded, this, &TcpServer::onGroupMembersLoaded);
 	connect(this->m_taskSignals, &TaskSignals::offlineLoaded, this, &TcpServer::onOfflineLoaded);
 
-	//启动自检：试连 MySQL，结果回主线程打印（fail-fast 提示；失败不终止——服务端降级运行）
+	//启动自检：试连 MySQL，结果回主线程打印（fail-fast 提示；失败不终止——服务端降级运行，需重启服务端进程恢复）
 	this->m_taskPool->start(new DbCheckTask(this->m_taskSignals));
 
 	//注册业务表
@@ -116,7 +116,7 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 		//为私聊
 		recvId = dataBody.mid(6, 5).toInt();
 
-		// 查路由表精准转发（转发原包，服务端不关心载荷内容）
+		//查路由表精准转发（转发原包，服务端不关心载荷内容）
 		TcpSocket* targetSocket = this->m_uidSocketMap.value(recvId);
 		if (targetSocket != nullptr) {
 			//对方在线：主线程直接转发（零 DB，快业务）
@@ -124,7 +124,7 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 			qDebug() << QStringLiteral("[Message] %1 → %2 转发成功").arg(sendId).arg(recvId);
 		}
 		else {
-			//对方不在线：入库暂存外包给池（fire-and-forget，主线程不等待 INSERT 完成）
+			//对方不在线：入库暂存外包给池
 			this->m_taskPool->start(new InsertOfflineTask(recvId, dataBody));
 			qDebug() << QStringLiteral("[Offline] uid=%1 离线，消息入库暂存").arg(recvId);
 		}
@@ -133,7 +133,7 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 		//为群聊：recvId 为 4 位群号（即 departmentID）
 		recvId = dataBody.mid(6, 4).toInt();
 
-		//群成员查询外包给池：主线程不挂起等待（会阻塞其他客户端），
+		//群成员查询外包给池
 		//原包 fullPacket/dataBody 随任务往返（查询期间消息"在途"），查完回 onGroupMembersLoaded 分发
 		this->m_taskPool->start(new GroupMembersTask(descriptor, sendId, recvId, fullPacket, dataBody, this->m_taskSignals));
 	}
@@ -325,7 +325,7 @@ void TcpServer::onCheckTimeout() {
 }
 
 void TcpServer::onDbChecked(bool ok, const QString& error) {
-	//启动自检结果：成功打印就绪；失败打印错误（降级运行，不终止——MySQL 恢复后首个任务会重建连接）
+	//启动自检结果：成功打印就绪；失败打印错误（降级运行，不终止——失败连接仍被登记复用，需重启服务端进程恢复）
 
 	if (ok == true) {
 		qDebug() << QStringLiteral("[DbCheck] 数据库连接自检通过，服务端就绪");
@@ -336,42 +336,39 @@ void TcpServer::onDbChecked(bool ok, const QString& error) {
 }
 
 void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot) {
-	//LoginTask 结果处理：拼响应 / 互踢 / 绑路由 / 触发离线拉取
+	//LoginTask 结果处理： 回发响应包 / 绑路由 / 推送离线表
 	//（DB 验证和快照打包已在池线程完成，此处只做发包和内存路由操作）
 
-	// 0. 竞态防护：验证在途期间（MySQL 慢）客户端可能已断开，结果作废
+	// 竞态防护：验证在途期间（MySQL 慢）客户端可能已断开，结果作废
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
 	if (socket == nullptr) {
 		qDebug() << QStringLiteral("[Login] fd=%1 验证完成但连接已断开，结果作废").arg(descriptor);
 		return;
 	}
 
-	// 1. 验证失败：回发失败标志
+	// 1. 回发登录响应
 	if (ok == false) {
 		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), "0", socket);
 		return;
 	}
+	else {
+		QByteArray body = "1" + QString::number(uid).rightJustified(5, '0').toUtf8() + snapshot;
+		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, socket);
+	}
 
-	// 2. 互踢：该 uid 已有旧连接在线 → 通知旧客户端 + 断开旧连接
-	//（客户端收到 KickOut 后置断线意图为"被踢"，不再自动重连，直接回登录界面）
+	// 2. 绑定路由表
+	//	  重复登录踢下线
 	TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
 	if (oldSocket != nullptr && oldSocket != socket) {
 		qDebug() << QStringLiteral("[KickOut] uid=%1 重复登录，踢除旧连接 fd=%2").arg(uid).arg(oldSocket->socketDescriptor());
 
 		this->sendPacket(static_cast<quint16>(PacketType::KickOut), QByteArray(), oldSocket);
-		oldSocket->disconnectFromHost();		//异步断开，稍后触发 onClientDisconnected（其中映射指向校验防误删新路由）
+		oldSocket->disconnectFromHost();
 	}
-
-	// 3. 绑定新连接路由：socket 记 uid，路由表 uid → socket
 	socket->setUid(uid);
 	this->m_uidSocketMap.insert(uid, socket);
 
-	// 4. 回发成功响应："1" + uid(5位定长) + 通讯录快照
-	//（格式与客户端解析对应：mid(1,5) 取 uid，mid(6) 起为快照 JSON）
-	QByteArray body = "1" + QString::number(uid).rightJustified(5, '0').toUtf8() + snapshot;
-	this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, socket);
-
-	// 5. 拉取离线消息：外包给池（结果回 onOfflineLoaded 逐条推送）
+	// 3. 拉取离线消息：外包给池（结果回 onOfflineLoaded 逐条推送）
 	this->m_taskPool->start(new LoadOfflineTask(descriptor, uid, this->m_taskSignals));
 }
 
@@ -396,7 +393,7 @@ void TcpServer::onGroupMembersLoaded(int descriptor, int sendId, int groupId, co
 			onlineCount++;
 		}
 		else {
-			//离线：入库暂存，等其下次登录推送（fire-and-forget）
+			//离线：入库暂存，等其下次登录推送
 			this->m_taskPool->start(new InsertOfflineTask(memberId, dataBody));
 			offlineCount++;
 		}
@@ -408,7 +405,6 @@ void TcpServer::onGroupMembersLoaded(int descriptor, int sendId, int groupId, co
 
 void TcpServer::onOfflineLoaded(int descriptor, int uid, const QList<QByteArray>& contents) {
 	//LoadOfflineTask 结果处理：逐条推送离线消息
-	//（消息已在池线程删除完毕；此处只管发包——若推送前用户又断线，这批消息会丢，方案已确认接受）
 
 	//竞态防护：拉取在途期间客户端可能已断开，结果作废
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);

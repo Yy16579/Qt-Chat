@@ -278,7 +278,6 @@ LoadOfflineTask::LoadOfflineTask(int descriptor, int uid, TaskSignals* taskSigna
 
 void LoadOfflineTask::run() {
 	//离线消息拉取：一次 SELECT 全部 + 一批 DELETE，结果回传主线程逐条发包
-	//行为变化（方案已确认）：由"主线程发一条删一条"改为"任务里先删干净 → 才 emit 回主线程发"
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);

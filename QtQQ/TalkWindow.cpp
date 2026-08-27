@@ -139,6 +139,10 @@ void TalkWindow::initPTOPTalk() {
 }
 
 void TalkWindow::addPeopleItem(QTreeWidgetItem* pRootGroupItem, int empID) {
+	if (empID == WindowManager::getInstance().m_empID) {
+		return;
+	}
+
 	//创建子项
 	QTreeWidgetItem* pChild = new QTreeWidgetItem();
 
