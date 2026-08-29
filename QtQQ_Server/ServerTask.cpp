@@ -165,7 +165,7 @@ void LoginTask::run() {
 }
 
 QByteArray LoginTask::buildContactSnapshot() {
-	//通讯录快照打包：两张表全量 → 紧凑 JSON（原 TcpServer::buildContactSnapshot 平移）
+	//通讯录快照打包：两张表全量 → 紧凑 JSON
 
 	// 打包 tab_employees 全量表（过滤 status = 0 的用户）
 	QJsonArray employees;
@@ -214,43 +214,78 @@ QByteArray LoginTask::buildContactSnapshot() {
 }
 
 
-//---------- GroupMembersTask ----------
+//---------- StoreMsgTask ----------
 
-GroupMembersTask::GroupMembersTask(int descriptor, int sendId, int groupId,
-	const QByteArray& fullPacket, const QByteArray& dataBody, TaskSignals* taskSignals)
+StoreMsgTask::StoreMsgTask(int descriptor, QString msgId, int recvId, QByteArray content, TaskSignals* taskSignals)
 	: m_descriptor(descriptor)
-	, m_sendId(sendId)
-	, m_groupId(groupId)
-	, m_fullPacket(fullPacket)
-	, m_dataBody(dataBody)
-	, m_signals(taskSignals)
-{
+	, m_msgId(msgId)
+	, m_recvId(recvId)
+	,m_content(content)
+	,m_signals(taskSignals)
+{}
+
+void StoreMsgTask::run() {
+	//私聊消息入库：INSERT IGNORE（幂等，msg_id 唯一键冲突时静默跳过）
+	//只产出数据（成败 + 本行 id），ACK / 高水位 / 敲门留给主线程结果槽
+
+	QSqlDatabase db = DbConnPool::getInstance().get();
+	QSqlQuery query(db);		//★ 必须显式传 db（本项目无默认连接）
+
+	query.prepare("INSERT IGNORE INTO `tab_msg` (`recv_id`, `msg_id`, `content`) VALUES (?, ?, ?)");
+	query.addBindValue(m_recvId);
+	query.addBindValue(m_msgId);
+	query.addBindValue(m_content);
+
+	bool ok = query.exec();
+
+	//lastInsertId()：插了新行 → 本行自增 id；撞唯一键被 IGNORE → 0（重传重复包的暗号）
+	//（exec 成功 + rowId 0 = 幂等命中，也算"成功"——货已在档案馆，主线程据此跳过重复敲门）
+	quint64 rowId = 0;
+	if (ok == true) {
+		rowId = query.lastInsertId().toULongLong();
+	}
+	else {
+		qDebug() << QStringLiteral("[StoreMsg] fd=%1 uid=%2 入库失败：%3")
+			.arg(m_descriptor).arg(m_recvId).arg(query.lastError().text());
+	}
+
+	emit m_signals->msgStored(m_descriptor, m_msgId, ok, m_recvId, rowId);
 }
 
+
+//---------- GroupMembersTask ----------
+
+GroupMembersTask::GroupMembersTask(int descriptor, QString msgId, int sendId, int groupId, QByteArray content, TaskSignals* taskSignals)
+	: m_descriptor(descriptor)
+	, m_msgId(msgId)
+	, m_sendId(sendId)
+	, m_groupId(groupId)
+	, m_content(content)
+	, m_signals(taskSignals)
+{}
+
 void GroupMembersTask::run() {
-	//群成员查询：公司群查全部在职员工，普通群查该部门在职员工
-	//原包随任务往返（查询期间"在途"），查完回主线程做在线转发 / 离线入库分发
+	//群消息分发入库：查群成员 → 按成员批量 INSERT（一人一行，跳过发送者本人）
+	//与旧实现的区别——不再"在线转发/离线入库"分流，全部入库（拉模型下成员上线自己 Pull）
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);
 
-	QList<int> memberIds;
+	QList<int> memberIds;		//实际入库的成员列表（跳过发送者后）
 
-	// 1. 查询公司群 ID
+	// 1. 查询公司群 ID（departmentID）
 	query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
 	query.addBindValue(QStringLiteral("公司群"));
 	query.exec();
 	query.next();
 	int compDepID = query.value(0).toInt();
 
-	// 2. 按群类型查成员列表
+	// 2. 按群类型查成员列表（公司群 = 全部在职 / 普通群 = 该部门在职）
 	if (m_groupId == compDepID) {
-		//公司群：查全部在职员工
 		query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ?");
 		query.addBindValue(1);
 	}
 	else {
-		//普通群：查该部门在职员工
 		query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ? AND `departmentID` = ?");
 		query.addBindValue(1);
 		query.addBindValue(m_groupId);
@@ -259,78 +294,52 @@ void GroupMembersTask::run() {
 
 	//结果集先取出存列表（QSqlQuery 单结果集遍历，防止后续复用被破坏）
 	while (query.next() == true) {
-		memberIds << query.value(0).toInt();
+		int memberId = query.value(0).toInt();
+
+		//跳过发送者本人（自己的消息不入库——客户端已本地渲染）
+		if (memberId == m_sendId) {
+			continue;
+		}
+		memberIds << memberId;
 	}
 
-	// 3. 结果回传主线程（原包一并带回）
-	emit m_signals->groupMembersLoaded(m_descriptor, m_sendId, m_groupId, memberIds, m_fullPacket, m_dataBody);
+	// 3. 批量入库：循环 INSERT IGNORE（一人一行，recv_id = 各成员 uid，msg_id / content 相同）
+	bool ok = true;				//批量成败标志（任一行失败即 false）
+	quint64 maxRowId = 0;		//本批各行 id 的最大值（整批幂等命中时保持 0）
+
+	for (int memberId : memberIds) {
+		QSqlQuery insertQuery(db);
+		insertQuery.prepare("INSERT IGNORE INTO `tab_msg` (`recv_id`, `msg_id`, `content`) VALUES (?, ?, ?)");
+		insertQuery.addBindValue(memberId);
+		insertQuery.addBindValue(m_msgId);
+		insertQuery.addBindValue(m_content);
+
+		if (insertQuery.exec() == false) {
+			ok = false;
+			qDebug() << QStringLiteral("[GroupStore] uid=%1 入库失败：%2")
+				.arg(memberId).arg(insertQuery.lastError().text());
+			continue;
+		}
+
+		//lastInsertId()：新行 → 本行 id；幂等命中 → 0（不计入 maxRowId）
+		quint64 rowId = insertQuery.lastInsertId().toULongLong();
+		if (rowId > maxRowId) {
+			maxRowId = rowId;
+		}
+	}
+
+	qDebug() << QStringLiteral("[GroupStore] 群%1 消息入库完成：%2 人，本批最大 id=%3")
+		.arg(m_groupId).arg(memberIds.size()).arg(maxRowId);
+
+	//回执带 memberIds：主线程据此对每个入库成员更新高水位 + 敲门（在线者），零 DB 查询
+	emit m_signals->groupMsgStored(m_descriptor, m_msgId, ok, memberIds, maxRowId);
 }
 
 
-//---------- LoadOfflineTask ----------
-
-LoadOfflineTask::LoadOfflineTask(int descriptor, int uid, TaskSignals* taskSignals)
-	: m_descriptor(descriptor)
-	, m_uid(uid)
-	, m_signals(taskSignals)
-{
-}
-
-void LoadOfflineTask::run() {
-	//离线消息拉取：一次 SELECT 全部 + 一批 DELETE，结果回传主线程逐条发包
-
-	QSqlDatabase db = DbConnPool::getInstance().get();
-	QSqlQuery query(db);
-
-	// 1. 查询该用户全部离线消息（按 id 升序保证推送顺序）
-	query.prepare("SELECT `id`, `content` FROM `tab_offline_msg` WHERE `recv_id` = ? ORDER BY `id` ASC");
-	query.addBindValue(m_uid);
-	query.exec();
-
-	QList<QByteArray> contents;		//消息正文列表（存的 dataBody 原文）
-	QList<int> ids;					//消息主键列表（用于删除）
-
-	while (query.next() == true) {
-		ids << query.value(0).toInt();
-		contents << query.value(1).toByteArray();
-	}
-
-	// 2. 批量删除（池线程里删，不卡主线程）
-	for (int msgId : ids) {
-		QSqlQuery delQuery(db);
-		delQuery.prepare("DELETE FROM `tab_offline_msg` WHERE `id` = ?");
-		delQuery.addBindValue(msgId);
-		delQuery.exec();
-	}
-
-	// 3. 结果回传主线程逐条发包
-	if (contents.size() > 0) {
-		qDebug() << QStringLiteral("[Offline] uid=%1 登录，已拉取 %2 条离线消息待推送").arg(m_uid).arg(contents.size());
-	}
-	emit m_signals->offlineLoaded(m_descriptor, m_uid, contents);
-}
-
-
-//---------- InsertOfflineTask ----------
-
-InsertOfflineTask::InsertOfflineTask(int recvId, const QByteArray& content)
-	: m_recvId(recvId)
-	, m_content(content)
-{
-}
-
-void InsertOfflineTask::run() {
-	//离线消息暂存：fire-and-forget，塞进池就不管，无结果回传
-
-	QSqlDatabase db = DbConnPool::getInstance().get();
-	QSqlQuery query(db);
-
-	query.prepare("INSERT INTO `tab_offline_msg` (`recv_id`, `content`) VALUES (?, ?)");
-	query.addBindValue(m_recvId);
-	query.addBindValue(m_content);
-
-	if (query.exec() == false) {
-		qDebug() << QStringLiteral("[Offline] uid=%1 离线消息入库失败：%2")
-			.arg(m_recvId).arg(query.lastError().text());
-	}
-}
+//---------- PullTask ----------
+// TODO(你来实现)：分页拉取任务
+// SQL：SELECT `id`, `content` FROM `tab_msg` WHERE `recv_id` = ? AND `id` > ? ORDER BY `id` ASC LIMIT 20
+// 遍历结果集 → QList<QByteArray> contents（content 原文列表）
+// newCursor = 最后一条的 id；空结果集 → newCursor = 传入的原账本（客户端停止续拉的信号）
+// → emit m_signals->pullLoaded(descriptor, newCursor, contents)
+// ------------------------------------------------------------------------------------------------------------------------------

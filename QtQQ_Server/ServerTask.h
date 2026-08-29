@@ -9,7 +9,6 @@
 #include <QtGlobal>
 
 
-
 //====================================================== DbConnPool（连接管家）=====================================================
 // 池线程专用的 MySQL 连接管理器：每线程惰性创建一个命名连接，之后复用
 // QSqlDatabase 铁律：连接在哪个线程创建，就只能在哪个线程使用（一个线程一个连接，连接不能跨线程使用）
@@ -58,13 +57,18 @@ signals:
 	//登录验证完成：ok = 账密是否验证通过；snapshot = 通讯录快照 JSON（验证失败为空）
 	void loginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot);
 
-	//群成员查询完成：原包 fullPacket / dataBody 随任务往返（查询期间消息"在途"，回主线程才继续转发）
-	void groupMembersLoaded(int descriptor, int sendId, int groupId,
-		const QList<int>& memberIds,
-		const QByteArray& fullPacket, const QByteArray& dataBody);
+	//私聊消息入库完成（StoreMsgTask 的结果回执）
+	//ok = INSERT 成败；rowId = 本行自增 id（为 0 = INSERT IGNORE 幂等命中 → 重传的重复包，槽里跳过高水位更新和敲门）
+	//主线程据 recvId + rowId 完成更新 m_userMaxId + 敲门收件人，零 DB 查询
+	void msgStored(int descriptor, const QString& msgId, bool ok, int recvId, quint64 rowId);
 
-	//离线消息拉取完成：contents = 该用户全部离线消息的 dataBody 原文列表
-	void offlineLoaded(int descriptor, int uid, const QList<QByteArray>& contents);
+	//群消息批量入库完成（GroupMembersTask 的结果回执）
+	//memberIds = 实际入库的成员列表（已跳过发送者本人）；rowId = 本批各行 id 的最大值（0 = 整批幂等命中）
+	void groupMsgStored(int descriptor, const QString& msgId, bool ok, const QList<int>& memberIds, quint64 rowId);
+
+	// TODO(你来实现)：pullLoaded —— PullTask（分页拉取查询）的结果回执
+	//    参数建议：int descriptor、quint64 newCursor（本页最大 id）、QList<QByteArray> contents（消息载荷列表）
+	//    语义：主线程封 PullResponse 包（[新账本10B][条数1B]+N×[载荷]）发给客户端
 };
 
 
@@ -77,7 +81,7 @@ signals:
 //   5. 任务只碰数据库和纯数据，绝不碰 socket / 路由表（线程亲和性铁律）
 
 //---------- DbCheckTask：启动自检任务 ----------
-// 服务端启动时投一个到池：试连 MySQL，结果回传主线程打印（替代原 initDatabase 的 fail-fast 报错）
+// 服务端启动时投一个到池：试连 MySQL，结果回传主线程打印
 class DbCheckTask : public QRunnable
 {
 public:
@@ -86,13 +90,12 @@ public:
 	void run() override;
 
 private:
-	TaskSignals* m_signals;		//结果回传器（主线程对象，只 emit 不 delete）
+	TaskSignals* m_signals;		
 };
 
 
 //---------- LoginTask：登录验证任务 ----------
 // 双方式账密验证（employeeID / account 字段）+ 验证成功时打包通讯录快照
-// 原 handleLoginRequest 的 DB 段 + buildContactSnapshot 平移至此，只产出数据，不含发包逻辑
 class LoginTask : public QRunnable
 {
 public:
@@ -104,62 +107,53 @@ private:
 	QByteArray buildContactSnapshot();		//打包通讯录快照 JSON（两张表全量 → 紧凑 JSON）
 
 private:
-	int m_descriptor;			//来源连接的 fd（结果回传时的关联键）
+	int m_descriptor;			//来源连接的 fd
 	QString m_account;			//账号（employeeID 或 account 字段）
 	QString m_password;			//密码
 	TaskSignals* m_signals;		//结果回传器
 };
 
 
-//---------- GroupMembersTask：群成员查询任务 ----------
-// 查询群成员列表（公司群 = 全部在职员工 / 普通群 = 该部门在职员工）
-// 原 handleMessage 群聊分支的 DB 段平移；原包随任务往返，查完回主线程做在线转发/离线入库
-class GroupMembersTask : public QRunnable
-{
+//---------- StoreMsgTask：私聊消息入库任务 ----------
+// INSERT IGNORE（幂等：msg_id 唯一键冲突时静默跳过，发送端重传不会造成重复入库）
+// 注意：content 存的是"消息载荷"（[群标志|发送者|接收者|类型|内容]，不含 msgId 头），Pull 时原样下发
+class StoreMsgTask : public QRunnable {
 public:
-	GroupMembersTask(int descriptor, int sendId, int groupId,
-		const QByteArray& fullPacket, const QByteArray& dataBody, TaskSignals* taskSignals);
+	StoreMsgTask(int descriptor, QString msgId, int recvId, QByteArray content, TaskSignals* taskSignals);
 
 	void run() override;
 
 private:
 	int m_descriptor;			//来源连接的 fd
-	int m_sendId;				//发送者 uid（主线程分发时跳过本人用）
+	QString m_msgId;			//消息幂等键（tab_msg.msg_id 唯一索引，重传挡板）
+	int m_recvId;				//收件人 uid（tab_msg.recv_id）
+	QByteArray m_content;		//消息载荷原文
+	TaskSignals* m_signals;		//结果回传器
+};
+
+
+//---------- GroupMembersTask：群消息分发入库任务 ----------
+// 查群成员（公司群 = 全部在职 / 普通群 = 该部门在职）→ 按成员批量 INSERT（一人一行，跳过发送者本人）
+class GroupMembersTask : public QRunnable {
+public:
+	GroupMembersTask(int descriptor, QString msgId, int sendId, int groupId, QByteArray content, TaskSignals* taskSignals);
+
+	void run() override;
+
+private:
+	int m_descriptor;			//来源连接的 fd
+	QString m_msgId;			//消息幂等键（本批各行共用，撞唯一键 = 整批幂等命中）
+	int m_sendId;				//发送者 uid（入库时跳过本人——自己的消息客户端已本地渲染）
 	int m_groupId;				//群号（departmentID）
-	QByteArray m_fullPacket;	//完整原始包（含外层包头）——查询期间"在途"，带回主线程转发用
-	QByteArray m_dataBody;		//数据体——离线成员入库用
+	QByteArray m_content;		//消息载荷原文（一人一份，内容相同）
 	TaskSignals* m_signals;		//结果回传器
 };
 
 
-//---------- LoadOfflineTask：离线消息拉取任务 ----------
-// 一次 SELECT 全部 + 一批 DELETE，结果回传主线程逐条发包
-// 原 pushOfflineMessages 平移；行为变化（方案已确认）：由"主线程发一条删一条"改为"任务里先删干净 → 才 emit 回主线程发"
-class LoadOfflineTask : public QRunnable
-{
-public:
-	LoadOfflineTask(int descriptor, int uid, TaskSignals* taskSignals);
 
-	void run() override;
-
-private:
-	int m_descriptor;			//来源连接的 fd
-	int m_uid;					//要拉取离线消息的用户 uid
-	TaskSignals* m_signals;		//结果回传器
-};
-
-
-//---------- InsertOfflineTask：离线消息暂存任务 ----------
-// fire-and-forget：塞进池就不管，无结果回传
-// 原 handleMessage 离线分支的 INSERT 平移（私聊对方离线 / 群聊离线成员暂存共用）
-class InsertOfflineTask : public QRunnable
-{
-public:
-	InsertOfflineTask(int recvId, const QByteArray& content);
-
-	void run() override;
-
-private:
-	int m_recvId;				//离线接收者 uid
-	QByteArray m_content;		//离线消息的 dataBody 原文
-};
+//---------- PullTask：分页拉取任务 ----------
+// 职责：SELECT id, content FROM tab_msg WHERE recv_id = ? AND id > ?(账本) ORDER BY id ASC LIMIT 20
+//       → emit m_signals->pullLoaded(descriptor, 本页最大id, 载荷列表)
+// 构造参数建议：int descriptor、int uid（= socket->getUid()）、quint64 cursor（客户端账本）、TaskSignals*
+// 注意：空结果也要 emit（newCursor 回传原账本，客户端据此知道"没有更多了"停止续拉）
+// ----------------------------------------------------------------------------------------------------------------------
