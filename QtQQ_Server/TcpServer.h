@@ -35,9 +35,9 @@ private:
 	// 参数说明：fullPacket = 完整原始包（含外层包头）
 	//           dataBody  = 数据体（剥离外层包头后的业务数据）
 	//           descriptor = 来源客户端的 fd 标识
-	void handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 消息上行：解析 msgId/载荷 → 投 StoreMsgTask / GroupMembersTask（拉模型下只入库，从不转发）
-	void handlePullRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);		// 
-	void handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 心跳包：带账本对账（主线程直答；落后则回敲门——DB 再卡心跳不受影响）
+	void handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 消息上行：解析 msgId/seq/载荷 → 投 StoreMsgTask / GroupMembersTask（拉模型下只入库，从不转发）
+	void handlePullRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);		// 拉取请求：解析游标表 → 投 PullTask（TODO 待实现，见 .cpp 尾部注释）
+	void handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 心跳包：带游标表对账（主线程直答；落后则回敲门——DB 再卡心跳不受影响）
 	void handleLoginRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);		// 登录请求：解析账密 → LoginTask 验证（结果回 onLoginVerified）
 	void handleRegisterRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);	// 注册请求
 	void handleLogout(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 注销请求：解绑用户路由映射（纯内存，主线程直干）
@@ -58,16 +58,17 @@ private slots:
 	// 公共模式：开头查 m_fdSocketMap 判空——任务在途期间客户端可能已断开，结果作废（竞态防护）
 	void onDbChecked(bool ok, const QString& error);											// DbCheckTask：启动自检结果打印
 	void onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot);			// LoginTask：拼响应/互踢/绑路由
-	void onMsgStored(int descriptor, const QString& msgId, bool ok, int recvId, quint64 rowId);	// StoreMsgTask：回 ACK / 更新高水位 / 敲门收件人
+	void onMsgStored(int descriptor, const QString& msgId, bool ok, 
+						int recvId, int convId, quint64 seq);									// StoreMsgTask：回 ACK / 更新会话高水位 / 敲门收件人
 	void onGroupMsgStored(int descriptor, const QString& msgId, bool ok,
-		const QList<int>& memberIds, quint64 rowId);											// GroupMembersTask：回 ACK / 对在线成员逐个敲门
+						const QList<int>& memberIds, int convId, quint64 seq);					// GroupMembersTask：回 ACK / 对在线成员逐个敲门
 	// ======================================================================================================
 
 	
 
 	// TODO(你来实现)：拉取结果槽 --------------------------------------------------------------------------------
-	// void onPullLoaded(int descriptor, quint64 newCursor, const QList<QByteArray>& contents);
-	// 职责：①fd 判空 ②封 PullResponse 包：[新账本10B 右对齐补零][条数1B] + N × [msgId13B|载荷]
+	// void onPullLoaded(int descriptor, const QList<PullMsg>& messages);
+	// 职责：①fd 判空 ②封 PullResponse 包：[条数1B] + N × [convId5B|seq10B|msgId13B|载荷]
 	//      ③sendPacket 发给该 fd（消息本体的唯一出口时刻！）
 	// ------------------------------------------------------------------------------------------------------------
 
@@ -83,9 +84,8 @@ private:
 	QHash<PacketType, void (TcpServer::*)(const QByteArray&, const QByteArray&, int)> m_handlers;		// 业务表
 
 	QThreadPool* m_taskPool;		// 线程池（4 线程常驻：MySQL 慢查询全部外包于此）
-	TaskSignals* m_taskSignals;	// 池任务结果回传器（池线程 emit → 队列投递 → 主线程结果槽）
+	TaskSignals* m_taskSignals;		// 池任务结果回传器（池线程 emit → 队列投递 → 主线程结果槽）
 
-	//心跳对账用：uid → 该用户最新消息 id（入库回执时更新）
-	//对账逻辑（handleHeartbeat 内）：m_userMaxId[uid] > 心跳带的账本 → sendPacket(MsgNotify, 空体, socket)
-	QHash<int, quint64> m_userMaxId;
+	QHash<int, QHash<int, quint64>> m_convMaxSeq;	//心跳对账用：uid → (会话ID → 该会话最新 seq)（入库回执时更新，心跳对账）
 };
+

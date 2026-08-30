@@ -216,71 +216,74 @@ QByteArray LoginTask::buildContactSnapshot() {
 
 //---------- StoreMsgTask ----------
 
-StoreMsgTask::StoreMsgTask(int descriptor, QString msgId, int recvId, QByteArray content, TaskSignals* taskSignals)
+StoreMsgTask::StoreMsgTask(int descriptor, QString msgId, int recvId, int convId, quint64 seq, QByteArray content, TaskSignals* taskSignals)
 	: m_descriptor(descriptor)
 	, m_msgId(msgId)
 	, m_recvId(recvId)
-	,m_content(content)
-	,m_signals(taskSignals)
+	, m_convId(convId)
+	, m_seq(seq)
+	, m_content(content)
+	, m_signals(taskSignals)
 {}
 
 void StoreMsgTask::run() {
-	//私聊消息入库：INSERT IGNORE（幂等，msg_id 唯一键冲突时静默跳过）
-	//只产出数据（成败 + 本行 id），ACK / 高水位 / 敲门留给主线程结果槽
+	//私聊消息入库：INSERT IGNORE（ uk_recv_msg ( recv_id, msg_id ) 唯一键冲突时静默跳过，exec 仍返回 true）
+	//seq 由客户端取号机分配，服务端只透传入库（顺序在发送瞬间已冻结，与入库时序无关）
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);		//★ 必须显式传 db（本项目无默认连接）
 
-	query.prepare("INSERT IGNORE INTO `tab_msg` (`recv_id`, `msg_id`, `content`) VALUES (?, ?, ?)");
+	query.prepare("INSERT IGNORE INTO `tab_msg` (`recv_id`, `conv_id`, `msg_id`, `seq`, `content`) VALUES (?, ?, ?, ?, ?)");
 	query.addBindValue(m_recvId);
+	query.addBindValue(m_convId);
 	query.addBindValue(m_msgId);
+	query.addBindValue(m_seq);
 	query.addBindValue(m_content);
-
 	bool ok = query.exec();
 
-	//lastInsertId()：插了新行 → 本行自增 id；撞唯一键被 IGNORE → 0（重传重复包的暗号）
-	//（exec 成功 + rowId 0 = 幂等命中，也算"成功"——货已在档案馆，主线程据此跳过重复敲门）
-	quint64 rowId = 0;
-	if (ok == true) {
-		rowId = query.lastInsertId().toULongLong();
-	}
-	else {
+	if (ok == false) {
 		qDebug() << QStringLiteral("[StoreMsg] fd=%1 uid=%2 入库失败：%3")
 			.arg(m_descriptor).arg(m_recvId).arg(query.lastError().text());
 	}
 
-	emit m_signals->msgStored(m_descriptor, m_msgId, ok, m_recvId, rowId);
+	//重传重复包：被唯一键挡掉但 exec 为 true → ok = true 照发 ack 响应（让发送端停止重传）
+	emit m_signals->msgStored(m_descriptor, m_msgId, ok, m_recvId, m_convId, m_seq);
 }
 
 
 //---------- GroupMembersTask ----------
 
-GroupMembersTask::GroupMembersTask(int descriptor, QString msgId, int sendId, int groupId, QByteArray content, TaskSignals* taskSignals)
+GroupMembersTask::GroupMembersTask(int descriptor, QString msgId, int sendId, int groupId, quint64 seq, QByteArray content, TaskSignals* taskSignals)
 	: m_descriptor(descriptor)
 	, m_msgId(msgId)
 	, m_sendId(sendId)
 	, m_groupId(groupId)
+	, m_seq(seq)
 	, m_content(content)
 	, m_signals(taskSignals)
 {}
 
 void GroupMembersTask::run() {
 	//群消息分发入库：查群成员 → 按成员批量 INSERT（一人一行，跳过发送者本人）
-	//与旧实现的区别——不再"在线转发/离线入库"分流，全部入库（拉模型下成员上线自己 Pull）
+	//会话键 conv_id = 群号（m_groupId），整批共用同一 seq（群是同一序号空间，各成员在同一流水上对账）
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);
 
 	QList<int> memberIds;		//实际入库的成员列表（跳过发送者后）
 
-	// 1. 查询公司群 ID（departmentID）
+	// 查询公司群 ID（departmentID）——exec/next 失败直接回失败回执（杜绝"假成功"无声丢消息）
 	query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
 	query.addBindValue(QStringLiteral("公司群"));
-	query.exec();
-	query.next();
+	if (query.exec() == false || query.next() == false) {
+		qDebug() << QStringLiteral("[GroupStore] 群%1 查公司群ID失败：%2").arg(m_groupId).arg(query.lastError().text());
+		emit m_signals->groupMsgStored(m_descriptor, m_msgId, false, {}, m_groupId, m_seq);
+		return;
+	}
 	int compDepID = query.value(0).toInt();
 
-	// 2. 按群类型查成员列表（公司群 = 全部在职 / 普通群 = 该部门在职）
+	// 1. 按群类型查成员列表（公司群 = 全部在职 / 普通群 = 该部门在职）
+	//    exec 失败同样回失败回执（成员列表不可信就不能继续入库）
 	if (m_groupId == compDepID) {
 		query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ?");
 		query.addBindValue(1);
@@ -290,7 +293,12 @@ void GroupMembersTask::run() {
 		query.addBindValue(1);
 		query.addBindValue(m_groupId);
 	}
-	query.exec();
+	if (query.exec() == false) {
+		qDebug() << QStringLiteral("[GroupStore] 群%1 查成员失败：%2")
+			.arg(m_groupId).arg(query.lastError().text());
+		emit m_signals->groupMsgStored(m_descriptor, m_msgId, false, {}, m_groupId, m_seq);
+		return;
+	}
 
 	//结果集先取出存列表（QSqlQuery 单结果集遍历，防止后续复用被破坏）
 	while (query.next() == true) {
@@ -303,43 +311,32 @@ void GroupMembersTask::run() {
 		memberIds << memberId;
 	}
 
-	// 3. 批量入库：循环 INSERT IGNORE（一人一行，recv_id = 各成员 uid，msg_id / content 相同）
+	// 2. 批量入库：循环 INSERT IGNORE（一人一行，recv_id = 各成员 uid，conv_id/seq/msg_id/content 相同）
 	bool ok = true;				//批量成败标志（任一行失败即 false）
-	quint64 maxRowId = 0;		//本批各行 id 的最大值（整批幂等命中时保持 0）
 
 	for (int memberId : memberIds) {
 		QSqlQuery insertQuery(db);
-		insertQuery.prepare("INSERT IGNORE INTO `tab_msg` (`recv_id`, `msg_id`, `content`) VALUES (?, ?, ?)");
+		insertQuery.prepare("INSERT IGNORE INTO `tab_msg` (`recv_id`, `conv_id`, `msg_id`, `seq`, `content`) VALUES (?, ?, ?, ?, ?)");
 		insertQuery.addBindValue(memberId);
+		insertQuery.addBindValue(m_groupId);
 		insertQuery.addBindValue(m_msgId);
+		insertQuery.addBindValue(m_seq);
 		insertQuery.addBindValue(m_content);
 
 		if (insertQuery.exec() == false) {
 			ok = false;
-			qDebug() << QStringLiteral("[GroupStore] uid=%1 入库失败：%2")
-				.arg(memberId).arg(insertQuery.lastError().text());
-			continue;
-		}
-
-		//lastInsertId()：新行 → 本行 id；幂等命中 → 0（不计入 maxRowId）
-		quint64 rowId = insertQuery.lastInsertId().toULongLong();
-		if (rowId > maxRowId) {
-			maxRowId = rowId;
+			qDebug() << QStringLiteral("[GroupStore] uid=%1 入库失败：%2").arg(memberId).arg(insertQuery.lastError().text());
 		}
 	}
 
-	qDebug() << QStringLiteral("[GroupStore] 群%1 消息入库完成：%2 人，本批最大 id=%3")
-		.arg(m_groupId).arg(memberIds.size()).arg(maxRowId);
+	qDebug() << QStringLiteral("[GroupStore] 群%1 消息入库完成：seq=%2，%3 人")
+		.arg(m_groupId).arg(m_seq).arg(memberIds.size());
 
-	//回执带 memberIds：主线程据此对每个入库成员更新高水位 + 敲门（在线者），零 DB 查询
-	emit m_signals->groupMsgStored(m_descriptor, m_msgId, ok, memberIds, maxRowId);
+	// 3. 回执带 memberIds：主线程据此对每个入库成员更新高水位 + 敲门（在线者）
+	emit m_signals->groupMsgStored(m_descriptor, m_msgId, ok, memberIds, m_groupId, m_seq);
 }
 
 
 //---------- PullTask ----------
-// TODO(你来实现)：分页拉取任务
-// SQL：SELECT `id`, `content` FROM `tab_msg` WHERE `recv_id` = ? AND `id` > ? ORDER BY `id` ASC LIMIT 20
-// 遍历结果集 → QList<QByteArray> contents（content 原文列表）
-// newCursor = 最后一条的 id；空结果集 → newCursor = 传入的原账本（客户端停止续拉的信号）
-// → emit m_signals->pullLoaded(descriptor, newCursor, contents)
+// TODO(你来实现，后续完善）：逐会话分页拉取（实现要点见 ServerTask.h 文件底部 PullTask TODO 注释）
 // ------------------------------------------------------------------------------------------------------------------------------

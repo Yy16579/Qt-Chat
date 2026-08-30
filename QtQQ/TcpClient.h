@@ -5,7 +5,8 @@
 #include <QObject>
 #include <QTcpSocket>
 #include <QTimer>
-
+#include <QHash>
+#include <QMap>
 
 
 // 断线意图
@@ -13,6 +14,15 @@ enum class DisconnectIntent {
 	None,       //意外断线（服务端崩溃/网络故障/心跳超时abort）→ 触发自动重连
 	Logout,     //用户主动登出 → 不重连
 	KickOut     //被踢下线 → 不重连
+};
+
+
+// 待确认消息结构体
+struct PendingMsg {
+	QByteArray packet;		//数据体（[msgId|seq|载荷]，重传时再喂给 sendPacket 重封包头）
+	QString msgId;			//ACK 匹配键（服务端 MessageAck 数据体）
+	int attempts;			//本轮连通周期内已重传次数（3/6/12s 有界 3 次）
+	QTimer* timer;			//单次触发重传定时器（父对象 TcpClient）
 };
 
 
@@ -44,10 +54,6 @@ public:
 	// 发送注册请求
 	void sendRegisterRequest(const QString& account, const QString& password, const QString& name);
 
-	// ===== 数据库类接口 =====
-	// 发送数据库查询请求（SQL + 参数）
-	void sendDbQuery(const QString& sql, const QStringList& params = {});
-
 	// ===== 状态类接口 =====
 	// 发送心跳包
 	void sendHeartbeat();
@@ -55,6 +61,14 @@ public:
 private:
 	// 拼接包头并发送（所有上层接口最终调用这个）
 	void sendPacket(quint16 packetType, const QByteArray& dataBody);
+	// =================================================================================================================
+
+private:
+	// =================================================================================================================
+	void loadSeqState(int empID);		//登录成功时读回取号机（seq_<empID>.ini，防重启撞号）
+	void saveSeqState(int convId);		//取号时同步写盘（防崩溃窗口）
+	void flushPending();				//重连重登成功后全表重发（attempts 归零重新起表）
+	void clearPending();				//会话终结（Logout/KickOut）清空全表（责任解除+防泄漏）
 	// =================================================================================================================
 
 private:
@@ -109,4 +123,8 @@ private:
 
 	QTimer* m_reconnectTimer;		//断线重连定时器（单次触发，按退避间隔重排）
 	int m_reconnectAttempts;		//断线重连次数（计算退避间隔）
+
+	
+	QHash<QString, PendingMsg> m_pending;		//待确认消息表：msgId → 重传信息
+	QMap<int, quint64> m_sendCounter;			//取号机：会话ID → 已发出最大 seq（每会话独立计数）
 };

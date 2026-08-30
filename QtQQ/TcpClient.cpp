@@ -1,6 +1,7 @@
 #include "TcpClient.h"
 #include "CommonUtils.h"
 #include "ContactBook.h"
+#include "WindowManager.h"
 
 #include <QSettings>
 #include <QHostAddress>
@@ -26,7 +27,6 @@ TcpClient::TcpClient()
 	this->m_reconnectTimer = new QTimer(this);
 	this->m_reconnectTimer->setSingleShot(true);
 	connect(this->m_reconnectTimer, &QTimer::timeout, this, &TcpClient::connectToServer);
-
 
 	//监听自己的登录响应：自动重登的回音由内部槽接管
 	connect(this, &TcpClient::signalLoginResponse, this, &TcpClient::onLoginResponseInternal);
@@ -136,9 +136,16 @@ void TcpClient::connectToServer() {
 					this->m_password = "";
 					this->m_reconnectAttempts = 0;
 
+					this->clearPending();				//会话终结：pending 表责任解除（未确认消息不再追投）+ 防泄漏
 					this->m_reconnectTimer->stop();		//封存可能挂起的重连定时器
 				}
 				else {
+					//pending 全体停表（挂起）：消息未确认责任未了，等重连 flush；
+					//只停表不清表——attempts 冻结，重连 flush 时归零重计
+					for (auto it = this->m_pending.begin(); it != this->m_pending.end(); ++it) {
+						it.value().timer->stop();
+					}
+					
 					//意外断线（服务端崩溃/网络故障/心跳超时abort）：自动重连，开启重连定时器
 					this->startReconnectTimer();
 				}
@@ -229,8 +236,72 @@ bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 	//拼接内层数据包（文本格式）
 	strSend = strGroupFlag + strSendID + strRecvID + strDataType + strData;
 
-	//组装外层二进制头并发送（包类型=Message）
-	this->sendPacket(static_cast<quint16>(PacketType::Message), strSend.toUtf8());
+	// === 发送侧可靠性（超时重传）====================================================================================
+	// 数据体 = [msgId 13B][seq 10B][载荷]（载荷部分与旧格式一致，服务端按新格式解析）
+
+	// 1. msgId 生成：uid后3位 + 毫秒时间戳后10位（13位定宽十进制，幂等键）
+	//    撞号条件 = 同用户同毫秒双发（物理操作达不到，接受该理论缝隙）
+	QString msgId = QString::number(WindowManager::getInstance().m_empID % 1000).rightJustified(3, '0')
+		+ QString::number(QDateTime::currentMSecsSinceEpoch() % 10000000000LL).rightJustified(10, '0');
+
+	// 2. 取号：convId 与服务端对称（私聊=对方uid / 群聊=群号）
+	//    ++m_sendCounter：点击一次取一个号（号在点击瞬间冻结，网络/重传不改号）
+	int convId = groupFlag ? recvID : sendID;
+	quint64 seq = ++this->m_sendCounter[convId];
+	this->saveSeqState(convId);		//取号机即时写盘（防重启撞号）
+
+	// 3. 组装数据体并发出（现有接口，行为不变）
+	QByteArray body = msgId.toUtf8()
+		+ QString::number(seq).rightJustified(SEQ_LEN, '0').toUtf8()
+		+ strSend.toUtf8();
+	this->sendPacket(static_cast<quint16>(PacketType::Message), body);
+
+	// 4. 注册 pending 表 + 启动 3s 重传定时器（无 ACK 则 3/6/12s 有界重传 3 次）
+	//    存数据体而非整包：重传时再喂给 sendPacket 重封包头（包头是确定性拼接，同输入同输出）
+	PendingMsg pending;
+	pending.packet = body;
+	pending.msgId = msgId;
+	pending.attempts = 0;
+	pending.timer = new QTimer(this);
+	pending.timer->setSingleShot(true);
+	connect(pending.timer, &QTimer::timeout, this, [this, msgId]() {
+		//重传到期分流（lambda 内联，不占函数声明）
+
+		//条目可能已被 ACK 移除（停表与 timeout 的竞态兜底）
+		if (!this->m_pending.contains(msgId)) {
+			return;
+		}
+		PendingMsg& p = this->m_pending[msgId];
+
+		//断线中：不重排、不烧次数（挂起等重连 flush——消息未确认，责任未了）
+		if (!this->isConnected()) {
+			return;
+		}
+
+		//3 次耗尽：清理 + 通知失败（内嵌式提示，不弹窗；本地历史库不回滚——如实记录"我说过"）
+		if (p.attempts >= 3) {
+			qWarning() << QStringLiteral("[Send] msgId=%1 重传3次无ACK，放弃").arg(msgId);
+			emit this->signalErrorOccurred(QStringLiteral("消息发送失败，对方可能未收到"));
+			p.timer->stop();
+			p.timer->deleteLater();
+			this->m_pending.remove(msgId);		//remove 后不再碰 p（引用失效）
+			return;
+		}
+
+		//重发：存的数据体再喂给 sendPacket（字节级一致 → 服务端幂等挡重复 → 照样回 ACK → 停手）
+		p.attempts++;
+		this->sendPacket(static_cast<quint16>(PacketType::Message), p.packet);
+
+		//重排下一次（3→6→12s 有界）
+		static const int intervals[3] = { 3 * 1000, 6 * 1000, 12 * 1000 };
+		p.timer->start(intervals[qMin(p.attempts, 2)]);
+		qDebug() << QStringLiteral("[Send] msgId=%1 第%2次重传").arg(msgId).arg(p.attempts);
+	});
+	pending.timer->start(3 * 1000);
+	this->m_pending.insert(msgId, pending);
+	qDebug() << QStringLiteral("[Send] msgId=%1 conv=%2 seq=%3 已发出，pending=%4")
+		.arg(msgId).arg(convId).arg(seq).arg(this->m_pending.size());
+	// =================================================================================================================
 }
 
 void TcpClient::sendLoginRequest(const QString& account, const QString& password) {
@@ -286,10 +357,6 @@ void TcpClient::sendLogout() {
 }
 
 void TcpClient::sendRegisterRequest(const QString& account, const QString& password, const QString& name) {
-
-}
-
-void TcpClient::sendDbQuery(const QString& sql, const QStringList& params) {
 
 }
 
@@ -452,6 +519,9 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 			//成功登录
 			this->m_loggedIn = true;
 
+			//取号机状态载入
+			this->loadSeqState(empID);
+
 			//提取通讯录快照：6字节定长头（结果1B+uid5B）之后的附加数据
 			//必须先填缓存再 emit——emit 后 UserLogin 会立即 new CCMainWindow 查询缓存
 			if (dataBody.size() > 6) {
@@ -478,6 +548,29 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 		// ===== 心跳响应包 =====
 		// 刷新时间戳
 		this->m_lastPongTime = QDateTime::currentMSecsSinceEpoch();
+	}
+	else if (packetType == static_cast<quint16>(PacketType::MessageAck)) {
+		// ===== 投递确认包 =====
+		// 数据体 = msgId 13B：服务端入库成功的回执（含幂等命中——重传的重复包也算成功）
+		// 收到即移除 pending 条目 + 停重传定时器（上行可靠性闭环）
+		if (dataBody.size() < MSGID_LEN) {
+			qDebug() << QStringLiteral("[MessageAck] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
+			return;
+		}
+
+		QString msgId = QString::fromUtf8(dataBody.left(MSGID_LEN));
+		if (this->m_pending.contains(msgId)) {
+			//命中：停表销毁 + 移除条目（remove 后不再碰引用）
+			qDebug() << QStringLiteral("[MessageAck] msgId=%1 已投递，移除 pending（剩 %2 条）")
+				.arg(msgId).arg(this->m_pending.size() - 1);
+			this->m_pending[msgId].timer->stop();
+			this->m_pending[msgId].timer->deleteLater();
+			this->m_pending.remove(msgId);
+		}
+		else {
+			//迟到 ACK（对应已耗尽移除/已 flush 的条目），无害忽略
+			qDebug() << QStringLiteral("[MessageAck] msgId=%1 无对应 pending（迟到ACK），忽略").arg(msgId);
+		}
 	}
 	// ================================================================================================================
 }
@@ -550,6 +643,66 @@ void TcpClient::onLoginResponseInternal(bool result, int empID) {
 		//重登成功：会话恢复，重置退避计数（下次断线从 3s 重新起跳）
 		qDebug() << QStringLiteral("[Reconnect] 重连+重登成功，uid=%1 会话已恢复").arg(empID);
 		emit this->signalReconnected();
-		//服务端重登成功时会自动推送离线消息，补齐断线期间的消息
+
+		//pending 全表 flush 重发：断线期间未确认的消息重新投递
+		//（服务端 uk_recv_msg 幂等——重连前已入库的消息不会重复，未入库的这次补上）
+		this->flushPending();
 	}
 }
+
+
+// ===== 发送侧可靠性（超时重传 + 取号机持久化）=========================================================================
+
+void TcpClient::loadSeqState(int empID) {
+	//登录成功时读回取号机（seq_<empID>.ini，按账号分文件换号天然隔离）
+	//首次登录无键 → 空 QMap → 取号从 1 起（新会话新序号空间）
+
+	this->m_sendCounter.clear();
+
+	QSettings settings(QStringLiteral("seq_%1.ini").arg(empID), QSettings::IniFormat);
+	for (const QString& key : settings.allKeys()) {
+		//键格式：Send/<convId>
+		QStringList parts = key.split('/');
+		if (parts.size() != 2 || parts.at(0) != QStringLiteral("Send")) {
+			continue;
+		}
+		this->m_sendCounter[parts.at(1).toInt()] = settings.value(key).toULongLong();
+	}
+	qDebug() << QStringLiteral("[Seq] 取号机载入完成：uid=%1，共 %2 个会话")
+		.arg(empID).arg(this->m_sendCounter.size());
+}
+
+void TcpClient::saveSeqState(int convId) {
+	//取号时同步写盘（防崩溃窗口：取了号没写盘就崩溃，重启读回旧号 → 撞号）
+	//文件名用 WindowManager m_empID——调用时必在聊天态，主窗口已构造
+	QSettings settings(QStringLiteral("seq_%1.ini")
+		.arg(WindowManager::getInstance().m_empID), QSettings::IniFormat);
+	settings.setValue(QStringLiteral("Send/%1").arg(convId),
+		QString::number(this->m_sendCounter.value(convId)));
+	settings.sync();		//立即落盘
+}
+
+void TcpClient::flushPending() {
+	//重连+重登成功后：全表重发（attempts 归零，重新起 3s——重连后给满 3 次新机会）
+	for (auto it = this->m_pending.begin(); it != this->m_pending.end(); ++it) {
+		PendingMsg& p = it.value();
+		this->sendPacket(static_cast<quint16>(PacketType::Message), p.packet);
+		p.attempts = 0;
+		p.timer->start(3 * 1000);
+	}
+	if (!this->m_pending.isEmpty()) {
+		qDebug() << QStringLiteral("[Send] 重连恢复：flush 重发 %1 条待确认消息").arg(this->m_pending.size());
+	}
+}
+
+void TcpClient::clearPending() {
+	//会话终结（Logout/KickOut）清空全表（责任解除 + 防泄漏）
+	for (auto it = this->m_pending.begin(); it != this->m_pending.end(); ++it) {
+		if (it.value().timer != nullptr) {
+			it.value().timer->stop();
+			it.value().timer->deleteLater();
+		}
+	}
+	this->m_pending.clear();
+}
+// ======================================================================================================================

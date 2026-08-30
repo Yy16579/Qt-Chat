@@ -17,28 +17,35 @@ constexpr int PACKET_HEADER_SIZE = 7;
 constexpr quint16 PACKET_MAGIC = 0x5A5A;
 constexpr quint8 PACKET_VERSION = 1;
 
-// ===== 消息可靠性（推拉模型）常量 =====
+// ===== 消息可靠性（推拉模型 + seq 会话序号）常量 =====
 // msgId 定长：uid后3位 + 毫秒时间戳后10位（13位十进制，消息全局唯一身份证）
-// 用途：发送端重传的幂等键（服务端 tab_msg.msg_id 唯一索引，重复 INSERT 被数据库静默忽略）
+// 用途：发送端重传的幂等键（服务端 uk_recv_msg(recv_id,msg_id) 唯一索引，重复 INSERT 被数据库静默忽略）
+//       + MessageAck 回执凭据（发送端 pending 表按 msgId 记账，收 ACK 停重传定时器）
 constexpr int MSGID_LEN = 13;
 
-// 账本定长：10位十进制 = 客户端已收到的最大消息 id（tab_msg 自增主键）
-// 用途：拉取游标（WHERE id > 账本）+ 隐式批量确认 + 断点续传，客户端持久化于 QSettings
-constexpr int CURSOR_LEN = 10;
+// seq 定长：10位十进制 = 会话内连续序号（客户端"取号机"分配：每会话独立计数，点击发送瞬间取号）
+// 用途：会话内排序权威 + 拉取游标（WHERE seq > 游标）+ 空洞检测（收包校验 seq == 账本+1）
+// 取号计数器持久化于客户端 QSettings（重启不重号）
+constexpr int SEQ_LEN = 10;
 
-// Pull 分页大小：单次拉取最大条数（客户端收满自动续拉）
+// convId 定长：5位十进制补零 = 会话键（私聊 = 发送者 uid / 群聊 = 群号）
+// 用途：消息归属哪段对话（账本/游标按会话独立记账，tab_msg.conv_id 提列建索引）
+constexpr int CONV_LEN = 5;
+
+// Pull 分页大小：单次拉取单会话最大条数（客户端收满自动续拉）
 constexpr int PULL_PAGE_SIZE = 20;
 
 // 包类型枚举（按数据流方向 + 功能域排序：上行 → 下行信令 → 下行数据 → 其他）
 enum class PacketType : quint16 {
     // === 上行通道（客户端 → 服务器）0x01xx ===
     Message         = 0x0100,   // 消息上行（唯一数据上行通道）
-                                // 数据体 = [msgId 13B][群标志1B][发送者5B][接收者4~5B][类型1B][内容...]
-                                // 服务器收到只入库（INSERT IGNORE 幂等），从不转发消息本体
-    PullRequest     = 0x0101,   // 拉取请求（数据体 = 账本 10B = 我已收到的最大消息 id）
-                                // 触发时机：收到敲门 / 登录成功 / 心跳对账发现落后
-    Heartbeat       = 0x0102,   // 心跳包（数据体 = 账本 10B，服务器对账用）
-                                // 对账：该用户最新消息 id > 账本 → 回敲门（消息本体绝不搭心跳顺风车）
+                                // 数据体 = [msgId 13B][seq 10B][群标志1B][发送者5B][接收者4~5B][类型1B][内容...]
+                                // seq 由发送端取号机分配（会话内连续），服务器只入库（INSERT IGNORE 幂等），从不转发消息本体
+    PullRequest     = 0x0101,   // 拉取请求（数据体 = 游标表 = 每会话独立报进度）
+                                // 数据体 = [会话数 2B] + N × [convId 5B][游标 10B]
+                                // 触发时机：收到敲门 / 登录成功 / 心跳对账发现落后 / 空洞定点补拉（单会话）
+    Heartbeat       = 0x0102,   // 心跳包（数据体 = 游标表，与 PullRequest 同构）
+                                // 对账：任一会话 服务端最新 seq > 游标 → 回敲门（消息本体绝不搭心跳顺风车）
     LoginRequest    = 0x0103,   // 登录请求（数据体 = 账号|密码）
     RegisterRequest = 0x0104,   // 注册请求
     Logout          = 0x0105,   // 注销
@@ -55,9 +62,11 @@ enum class PacketType : quint16 {
 
     // === 下行数据通道（服务器 → 客户端）0x03xx ===
     PullResponse    = 0x0301,   // 拉取响应（消息本体唯一出口！）
-                                // 数据体 = [新账本 10B][条数 1B] + N × [msgId 13B | 消息载荷]
+                                // 数据体 = [条数 1B] + N × [convId 5B][seq 10B][msgId 13B | 消息载荷]
                                 // 消息载荷 = [群标志1B][发送者5B][接收者4~5B][类型1B][内容...]（与上行同构）
-                                // 客户端收满 PULL_PAGE_SIZE 条自动续拉（发新 PullRequest 带新账本）
+                                // 客户端逐条校验 seq == 账本[convId]+1：命中渲染落账 / 落后丢弃（重复）/
+                                // 超前发现空洞 → 该消息进乱序缓冲区 + 单会话定点补拉（游标=当前账本，500ms×5 次）
+                                // 收满 PULL_PAGE_SIZE 条自动续拉
 
     // === 其他 0x04xx / 0xFFxx ===
     DbQuery         = 0x0401,   // 数据库查询请求
