@@ -9,7 +9,7 @@
 #include <QMap>
 
 
-// 断线意图
+//断线意图
 enum class DisconnectIntent {
 	None,       //意外断线（服务端崩溃/网络故障/心跳超时abort）→ 触发自动重连
 	Logout,     //用户主动登出 → 不重连
@@ -17,7 +17,7 @@ enum class DisconnectIntent {
 };
 
 
-// 待确认消息结构体
+//待确认消息结构体
 struct PendingMsg {
 	QByteArray packet;		//数据体（[msgId|seq|载荷]，重传时再喂给 sendPacket 重封包头）
 	QString msgId;			//ACK 匹配键（服务端 MessageAck 数据体）
@@ -40,11 +40,13 @@ public:
 public:
 	// 数据包打包发送接口 ===================================================================================
 	// 拼接内部数据
-	// ===== 消息类接口 =====
+
 	// 发送消息包（返回 false = 发送失败：未连接/消息过长，调用方据此决定是否入本地仓库）
 	bool sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file = "");
 
-	// ===== 认证类接口 =====
+	// 发送拉取请求包
+	void sendPullRequest(int singleConvId = -1);
+
 	// 发送登录请求
 	void sendLoginRequest(const QString& account, const QString& password);
 
@@ -54,7 +56,6 @@ public:
 	// 发送注册请求
 	void sendRegisterRequest(const QString& account, const QString& password, const QString& name);
 
-	// ===== 状态类接口 =====
 	// 发送心跳包
 	void sendHeartbeat();
 	
@@ -65,10 +66,12 @@ private:
 
 private:
 	// =================================================================================================================
-	void loadSeqState(int empID);		//登录成功时读回取号机（seq_<empID>.ini，防重启撞号）
-	void saveSeqState(int convId);		//取号时同步写盘（防崩溃窗口）
-	void flushPending();				//重连重登成功后全表重发（attempts 归零重新起表）
-	void clearPending();				//会话终结（Logout/KickOut）清空全表（责任解除+防泄漏）
+	void loadSeqState(int empID);		//seq 表初始化（seq_<empID>.ini：[Send] 取号机 + [Ledger] 账本）
+	void saveSeqState(int convId);		//消息发送 seq 表状态同步至配置文件（防窗口崩溃）
+	void saveLedgerState(int convId);	//账本状态同步至配置文件（渲染落账时调用，防窗口崩溃）
+	QByteArray buildCursorTable(int singleConvId = -1);		//创建账本快照 [会话数2B] + N × [convId5B][游标10B]
+	void flushPending();				//断线重连重登成功后，未确认消息全表重发（attempts 归零）
+	void clearPending();				//会话终结（Logout/KickOut）清空全表
 	// =================================================================================================================
 
 private:
@@ -93,7 +96,7 @@ signals:
 	void signalReconnected();			//重连+重登成功，会话恢复信号（UI 恢复提示用）
 
 
-	// 数据包业务分发信号 ======================================================================================
+	// 业务分发信号 ====================================================================================================
 	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
 	void signalLoginResponse(bool result, int empID);
 	void signalKickedOut();
@@ -124,7 +127,9 @@ private:
 	QTimer* m_reconnectTimer;		//断线重连定时器（单次触发，按退避间隔重排）
 	int m_reconnectAttempts;		//断线重连次数（计算退避间隔）
 
-	
 	QHash<QString, PendingMsg> m_pending;		//待确认消息表：msgId → 重传信息
-	QMap<int, quint64> m_sendCounter;			//取号机：会话ID → 已发出最大 seq（每会话独立计数）
+	QHash<int, QMap<quint64, QByteArray>> m_reorderBuf;		//乱序缓冲区：会话ID → (seq → 消息项[convId|seq|msgId|载荷])，超前消息暂存
+
+	QMap<int, quint64> m_sendCounter;			//消息发送 seq 表：会话ID → 已发出最大 seq
+	QMap<int, quint64> m_ledger;				//消息接收 seq 表（账本）：会话ID → 已接收最大 seq
 };

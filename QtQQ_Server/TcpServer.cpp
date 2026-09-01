@@ -26,9 +26,7 @@ TcpServer::TcpServer(int port)
 	connect(this->m_taskSignals, &TaskSignals::loginVerified, this, &TcpServer::onLoginVerified);
 	connect(this->m_taskSignals, &TaskSignals::msgStored, this, &TcpServer::onMsgStored);
 	connect(this->m_taskSignals, &TaskSignals::groupMsgStored, this, &TcpServer::onGroupMsgStored);
-
-	// TODO(你来实现)：连接拉取回执信号（PullTask 实现后启用）
-	// connect(this->m_taskSignals, &TaskSignals::pullLoaded, this, &TcpServer::onPullLoaded);
+	connect(this->m_taskSignals, &TaskSignals::pullLoaded, this, &TcpServer::onPullLoaded);
 
 	//启动自检：试连 MySQL，结果回主线程打印（fail-fast 提示；失败不终止——服务端降级运行，需重启服务端进程恢复）
 	this->m_taskPool->start(new DbCheckTask(this->m_taskSignals));
@@ -97,7 +95,7 @@ void TcpServer::registerHandlers() {
 
 void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
 	// 推拉模型：只入库，从不转发消息本体
-	// 数据体布局 = [msgId 13B][seq 10B][群标志1B][发送者5B][接收者4~5B][类型1B][内容...]
+	// 数据体布局 = [msgId 13B][seq 10B][群标志1B][发送者5B][接收者（私聊5B/群聊4B）][类型1B][内容...]
 
 	// 登录校验：未登录的连接不允许发消息
 	TcpSocket* srcSocket = this->m_fdSocketMap.value(descriptor);
@@ -106,15 +104,16 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 		return;
 	}
 
-	// 长度校验：最小合法长度 = msgId 13B + seq 10B + 载荷头 12B（群标志1 + 发送者5 + 接收者5 + 类型1）
-	if (dataBody.size() < MSGID_LEN + SEQ_LEN + 12) {
+	// 长度校验：最小合法长度 = msgId 13B + seq 10B + 载荷头 11B（群标志1 + 发送者5 + 接收者4 + 类型1，按群聊头计算；
+	// 私聊头 12B 更长，天然覆盖）
+	if (dataBody.size() < MSGID_LEN + SEQ_LEN + 11) {
 		qDebug() << QStringLiteral("[Message] fd=%1 数据体过短(%2字节)，丢弃").arg(descriptor).arg(dataBody.size());
 		return;
 	}
 
 	// 切分：msgId / seq / 载荷
 	// seq = 客户端取号机分配的会话内序号（服务端只透传，顺序在发送瞬间已冻结，与入库时序无关）
-	// 载荷 = [群标志1B|发送者5B|接收者4~5B|类型1B|内容...]（不含 msgId/seq 头，入库存的就是它，Pull 时原样下发）
+	// 载荷 = [群标志1B|发送者5B|接收者（私聊5B/群聊4B）|类型1B|内容...]（不含 msgId/seq 头，入库存的就是它，Pull 时原样下发）
 	QString msgId = QString::fromUtf8(dataBody.left(MSGID_LEN));
 	quint64 seq = dataBody.mid(MSGID_LEN, SEQ_LEN).toULongLong();		//10B 补零十进制
 	QByteArray payload = dataBody.mid(MSGID_LEN + SEQ_LEN);
@@ -140,49 +139,82 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 }
 
 void TcpServer::handlePullRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
-	// TODO(你来实现，后续完善）：拉取请求处理（Pull 链路四件套之一，实现要点见文件尾部注释）
-	// 步骤：登录校验 → 解析游标表 [会话数2B]+N×[convId5B][游标10B]（参考 handleHeartbeat 现成代码）
-	//       → 投 PullTask(descriptor, uid, cursors, m_taskSignals) → 启用 registerHandlers 里的 PullRequest 注册
+	// 拉取请求处理：解析账本 → 投 PullTask
+	// 数据体 = [会话数 2B] + N × [convId 5B][游标 10B]（与心跳同构）
+
+	// fd 判空 + 登录校验（未登录的连接不允许拉取）
+	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
+	if (socket == nullptr || socket->getUid() == -1) {
+		qDebug() << QStringLiteral("[PullRequest] fd=%1 不存在或未登录，拒绝拉取").arg(descriptor);
+		return;
+	}
+	int uid = socket->getUid();
+
+	// 数据体校验：至少 2B 会话数头；总长度必须严格匹配 2 + N×(CONV_LEN+SEQ_LEN)
+	// 空包/格式错 → 直接丢弃（协议违规，不降级不脑补）
+	const int entryLen = CONV_LEN + SEQ_LEN;
+	int count = dataBody.left(2).toInt();		//会话数（2B 十进制补零）
+	if (dataBody.size() != 2 + count * entryLen) {
+		qDebug() << QStringLiteral("[PullRequest] fd=%1 游标表格式错误(%2字节)，丢弃")
+			.arg(descriptor).arg(dataBody.size());
+		return;
+	}
+
+	// 解析账本（count=0 时 cursors 为空表 → PullTask 不查库直接回空结果）
+	QHash<int, quint64> cursors;
+	for (int i = 0; i < count; ++i) {
+		int offset = 2 + i * entryLen;
+		cursors.insert(dataBody.mid(offset, CONV_LEN).toInt(),
+			dataBody.mid(offset + CONV_LEN, SEQ_LEN).toULongLong());
+	}
+
+	// 投池：逐会话查库（seq > 游标 的积压消息）→ 结果经 pullLoaded 信号回 onPullLoaded
+	this->m_taskPool->start(new PullTask(descriptor, uid, cursors, this->m_taskSignals));
+
+	qDebug() << QStringLiteral("[PullRequest] uid=%1 fd=%2 拉取 %3 个会话").arg(uid).arg(descriptor).arg(cursors.size());
 }
 
 void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
-	// 心跳包 = 保活 + 游标表对账（拉模型的兜底触发器）
+	// 心跳包 = 保活 + 账本对账（拉模型的兜底触发器）
 	// 数据体 = [会话数 2B（十进制补零）] + N × [convId 5B][游标 10B]（与 PullRequest 同构）
 
-	// 1. 回发心跳响应（保活语义）
+	// 回发心跳响应（保活）
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
 	if (socket == nullptr) {
 		return;
 	}
 	this->sendPacket(static_cast<quint16>(PacketType::HeartbeatResponse), QByteArray(), socket);
 
-	// 2. 未登录或没带游标表 → 只保活，不对账（兼容无数据体的心跳）
+	// 未登录或没带账本 → 只保活，不对账（兼容无数据体的心跳——刻意差异：
+	// PullRequest 不允许空包，心跳允许，心跳的空包 = 纯保活语义）
 	if (dataBody.isEmpty() == true || socket->getUid() == -1) {
 		return;
 	}
 
-	// 3. 解析游标表：[会话数 2B] + N × [convId 5B][游标 10B]
-	const int entryLen = CONV_LEN + SEQ_LEN;			//单条目长度
-	int count = dataBody.left(2).toInt();			//会话数（2B 十进制补零）
+	// 解析账本：[会话数 2B] + N × [convId 5B][游标 10B]
+	const int entryLen = CONV_LEN + SEQ_LEN;			//单条目长度（15B）
+	int count = dataBody.left(2).toInt();				//会话数（2B 十进制补零）
 	if (count <= 0 || dataBody.size() != 2 + count * entryLen) {
 		qDebug() << QStringLiteral("[Heartbeat] fd=%1 游标表格式错误(%2字节)，只保活").arg(descriptor).arg(dataBody.size());
 		return;
 	}
-
-	// 4. 逐会话比对（纯内存零 DB 查询——DB 再卡心跳不受影响）
-	//    任一会话 服务端最新 seq > 客户端游标 → 落后 → 补敲门（敲门丢了有下次心跳兜底）
-	int uid = socket->getUid();
-	const QHash<int, quint64> serverSeqs = this->m_convMaxSeq.value(uid);		//值拷贝（避免误建空表项）
+	QHash<int, quint64> cursors;		//客户端账本快照
 	for (int i = 0; i < count; ++i) {
 		int offset = 2 + i * entryLen;
-		int convId = dataBody.mid(offset, CONV_LEN).toInt();
-		quint64 cursor = dataBody.mid(offset + CONV_LEN, SEQ_LEN).toULongLong();
+		cursors.insert(dataBody.mid(offset, CONV_LEN).toInt(),
+			dataBody.mid(offset + CONV_LEN, SEQ_LEN).toULongLong());
+	}
 
-		if (serverSeqs.value(convId, 0) > cursor) {
+	// 单循环对账（纯内存零 DB 查询——DB 再卡心跳不受影响）
+	// .value(key, 0) 视为游标 0 —— 统一谓词：服务端最新 seq > 客户端游标 → 落后 → 敲门（丢了有下次心跳兜底）
+	int uid = socket->getUid();
+	const QHash<int, quint64> serverSeqs = this->m_convMaxSeq.value(uid);		//值拷贝（避免误建空表项）
+	for (auto it = serverSeqs.begin(); it != serverSeqs.end(); ++it) {
+		if (it.value() > cursors.value(it.key(), 0)) {
 			this->sendPacket(static_cast<quint16>(PacketType::MsgNotify), QByteArray(), socket);
 			qDebug() << QStringLiteral("[Heartbeat] uid=%1 会话%2 落后（游标=%3 服务端=%4），补敲门")
-				.arg(uid).arg(convId).arg(cursor).arg(serverSeqs.value(convId, 0));
-			break;		//敲门是"有新货"的信令，一次足够（客户端来 Pull 时全量对账）
+				.arg(uid).arg(it.key()).arg(cursors.value(it.key(), 0)).arg(it.value());
+			return;		//敲过门了，本轮对账结束
 		}
 	}
 }
@@ -347,14 +379,15 @@ void TcpServer::onCheckTimeout() {
 
 	//遍历中可能触发 onClientDisconnected 修改 m_fdSocketMap，先取出待踢列表再动手
 	QList<TcpSocket*> deadSockets;
-	for (TcpSocket* socket : this->m_fdSocketMap) {
-		if (now - socket->lastActive() > 30 * 1000) {
-			deadSockets.append(socket);
+	for (auto it = this->m_fdSocketMap.begin(); it != this->m_fdSocketMap.end(); ++it) {
+		if (now - it.value()->lastActive() > 30 * 1000) {
+			deadSockets.append(it.value());
 		}
 	}
 
 	for (TcpSocket* socket : deadSockets) {
-		qDebug() << QStringLiteral("[心跳超时] fd=%1 uid=%2 超过30s无活动，踢除").arg(socket->socketDescriptor()).arg(socket->getUid());
+		int fd = this->m_fdSocketMap.key(socket, -1);
+		qDebug() << QStringLiteral("[心跳超时] fd=%1 uid=%2 超过30s无活动，踢除").arg(fd).arg(socket->getUid());
 
 		// 服务端可能还往它身上写过东西 ：敲门包、LoginResponse、KickOut 包……
 		// 这些可能还躺在发送缓冲里没被对方 ACK。如果用 abort，这些数据直接扔了；
@@ -364,7 +397,7 @@ void TcpServer::onCheckTimeout() {
 }
 
 void TcpServer::onDbChecked(bool ok, const QString& error) {
-	//启动自检结果：成功打印就绪；失败打印错误（降级运行，不终止——失败连接仍被登记复用，需重启服务端进程恢复）
+	//自检结果：成功打印就绪；失败打印错误
 
 	if (ok == true) {
 		qDebug() << QStringLiteral("[DbCheck] 数据库连接自检通过，服务端就绪");
@@ -376,7 +409,6 @@ void TcpServer::onDbChecked(bool ok, const QString& error) {
 
 void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot) {
 	//LoginTask 结果处理：回发响应包 / 踢下线 / 绑路由
-	//（DB 验证和快照打包已在池线程完成）
 
 	// 竞态防护：验证在途期间（MySQL 慢）客户端可能已断开，结果作废
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
@@ -385,7 +417,7 @@ void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArr
 		return;
 	}
 
-	// 1. 回发登录响应
+	// 回发登录响应
 	if (ok == false) {
 		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), "0", socket);
 		return;
@@ -395,8 +427,8 @@ void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArr
 		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, socket);
 	}
 
-	// 2. 绑定路由表
-	//	  重复登录踢下线
+	// 绑定路由表
+	// 重复登录踢下线
 	TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
 	if (oldSocket != nullptr && oldSocket != socket) {
 		qDebug() << QStringLiteral("[KickOut] uid=%1 重复登录，踢除旧连接 fd=%2").arg(uid).arg(oldSocket->socketDescriptor());
@@ -409,10 +441,9 @@ void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArr
 }
 
 void TcpServer::onMsgStored(int descriptor, const QString& msgId, bool ok, int recvId, int convId, quint64 seq) {
-	//StoreMsgTask 结果处理：回发投递确认 ACK / 更新收件人会话高水位 / 敲门
-	//  高水位取 max 天然幂等，重复敲门最多引发一次空 Pull，无害）
+	//StoreMsgTask 结果处理：回发投递确认 ACK / 更新会话消息最大 seq / 敲门
 
-	// 入库失败：不回 ACK（发送端超时重传，msg_id 幂等自愈），也不敲门（库里没货）
+	// 入库失败：不回 ACK（等待发送端超时重传），也不敲门（库里没货）
 	if (ok == false) {
 		qDebug() << QStringLiteral("[StoreMsg] fd=%1 msgId=%2 入库失败，等待发送端重传").arg(descriptor).arg(msgId);
 		return;
@@ -424,7 +455,7 @@ void TcpServer::onMsgStored(int descriptor, const QString& msgId, bool ok, int r
 		this->sendPacket(static_cast<quint16>(PacketType::MessageAck), msgId.toUtf8(), srcSocket);
 	}
 
-	// 2. 更新收件人的会话高水位
+	// 2. 更新会话消息最大 seq
 	if (seq > this->m_convMaxSeq[recvId][convId]) {
 		this->m_convMaxSeq[recvId][convId] = seq;
 	}
@@ -438,10 +469,9 @@ void TcpServer::onMsgStored(int descriptor, const QString& msgId, bool ok, int r
 }
 
 void TcpServer::onGroupMsgStored(int descriptor, const QString& msgId, bool ok, const QList<int>& memberIds, int convId, quint64 seq) {
-	//GroupMembersTask 结果处理：回 ACK 给发送者 / 对在线成员逐个敲门
-	//（seq 方案：整批共用同一 seq，高水位取 max 天然幂等，重复敲门最多空 Pull 一次，无害）
+	//GroupMembersTask 结果处理：回发投递确认 ACK / 更新会话消息最大 seq / 群成员挨个敲门
 
-	// 批量入库失败：不回 ACK（发送端超时重传），不敲门
+	// 批量入库失败：不回 ACK（等待发送端超时重传），不敲门
 	if (ok == false) {
 		qDebug() << QStringLiteral("[GroupStore] fd=%1 msgId=%2 批量入库失败，等待发送端重传").arg(descriptor).arg(msgId);
 		return;
@@ -453,7 +483,7 @@ void TcpServer::onGroupMsgStored(int descriptor, const QString& msgId, bool ok, 
 		this->sendPacket(static_cast<quint16>(PacketType::MessageAck), msgId.toUtf8(), srcSocket);
 	}
 
-	// 2. 对每个入库成员：更新会话高水位 + 在线则敲门（敲门是"通知在线者来拉"，查路由表即可）
+	// 2. 对每个入库成员：更新会话消息最大 seq + 在线则敲门（敲门是"通知在线者来拉"，查路由表即可）
 	int knocked = 0;		//敲门计数（日志用）
 	for (int memberId : memberIds) {
 		if (seq > this->m_convMaxSeq[memberId][convId]) {
@@ -471,23 +501,27 @@ void TcpServer::onGroupMsgStored(int descriptor, const QString& msgId, bool ok, 
 		.arg(convId).arg(seq).arg(memberIds.size()).arg(knocked);
 }
 
+void TcpServer::onPullLoaded(int descriptor, const QList<QByteArray>& messages) {
+	//PullTask 拉取结果 → 拼盘下发（消息本体唯一出口）
+	//池线程已把每条消息预封成 [convId 5B|seq 10B|msgId 13B|载荷]，主线程纯搬运
 
-// TODO(你来实现，后续完善）：Pull 链路四件套（seq 版） ----------------------------------------------------------
-// 1. ServerTask.h：struct PullMsg { int convId; quint64 seq; QString msgId; QByteArray content; } + Q_DECLARE_METATYPE(PullMsg)
-//    + 信号 void pullLoaded(int descriptor, const QList<PullMsg>& messages);
-//    ★ 跨线程信号传自定义类型：本文件构造函数里 qRegisterMetaType<QList<PullMsg>>()（一次性，否则队列连接丢参数）
-// 2. ServerTask.h/.cpp：PullTask 类（构造带 int uid + QHash<int, quint64> cursors 客户端游标表）
-//    run()：遍历 cursors 逐会话 SELECT `msg_id`,`seq`,`content` FROM `tab_msg`
-//           WHERE `recv_id`=? AND `conv_id`=? AND `seq`>? ORDER BY `seq` ASC LIMIT 20 → 汇总 QList<PullMsg>
-//    （空结果也要 emit——客户端据"条数 0"停止续拉）
-// 3. handlePullRequest：登录校验 → 解析游标表 [会话数2B]+N×[convId5B][游标10B] → 投 PullTask
-//    （游标表解析可抄 handleHeartbeat 的现成代码；PullRequest 已注册、handlePullRequest 已是空壳，填实现即可
-//     + 构造函数 pullLoaded connect 待启用）
-// 4. onPullLoaded：fd 判空 → 封 PullResponse 包 → sendPacket（消息本体唯一出口时刻！）
-//
-// 封包格式速查（Protocol.h 注释同源）：
-//   convId/seq 编码 = QString::number(x).rightJustified(N, '0')（右对齐补零十进制 ASCII，N = CONV_LEN / SEQ_LEN）
-//   游标表 = [会话数 2B 十进制补零] + N × [convId 5B][游标 10B]
-//   PullResponse 数据体 = [条数 1B] + N × [convId 5B][seq 10B][msgId 13B][载荷原文]
-//   MessageAck 数据体 = msgId 13B 原文；MsgNotify 数据体 = 空
-// ----------------------------------------------------------------------------------------------------------------
+	//竞态防护：任务在途期间客户端可能已断开，结果作废
+	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
+	if (socket == nullptr) {
+		qDebug() << QStringLiteral("[Pull] fd=%1 拉取完成但连接已断开，结果作废").arg(descriptor);
+		return;
+	}
+
+	//拼数据体：[条数 1B] + N 条预封消息顺序 append（不拆不重拼）
+	//条数超 255 截断（协议 1B 上限；截断部分客户端下轮续拉补齐——收满 PULL_PAGE_SIZE 会续拉）
+	int sendCount = qMin(messages.size(), 255);
+	QByteArray dataBody;
+	dataBody.append(static_cast<char>(sendCount));
+	for (int i = 0; i < sendCount; ++i) {
+		dataBody.append(messages.at(i));
+	}
+
+	this->sendPacket(static_cast<quint16>(PacketType::PullResponse), dataBody, socket);
+	qDebug() << QStringLiteral("[Pull] fd=%1 拉取下发 %2 条").arg(descriptor).arg(sendCount);
+}
+

@@ -1,4 +1,5 @@
 #include "ServerTask.h"
+#include "Protocol.h"		//协议常量（SEQ_LEN/CONV_LEN/PULL_PAGE_SIZE 预封用）
 
 #include <QSettings>
 #include <QCoreApplication>
@@ -23,7 +24,7 @@ QSqlDatabase DbConnPool::get() {
 	Qt::HANDLE tid = QThread::currentThreadId();	//获取当前线程 tid
 
 	// 加锁查表（锁只保护容器读写，临界区极小）（持锁：不同线程并发 insert 不同 key 时保护 QHash 结构完整）
-	//   大括号的作用 = 限定 QMutexLocker 的生命周期：出了作用域 locker 析构、锁释放
+	// 大括号的作用 = 限定 QMutexLocker 的生命周期：出了作用域 locker 析构、锁释放
 	{
 		QMutexLocker locker(&this->m_mutex);
 
@@ -109,7 +110,6 @@ LoginTask::LoginTask(int descriptor, const QString& account, const QString& pass
 
 void LoginTask::run() {
 	//登录验证：双方式（employeeID / account 字段）+ 成功时打包通讯录快照
-	//只产出数据（验证结论 + 快照字节），发包 / 互踢 / 绑路由留给主线程结果槽
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);		//★ 必须显式传 db，QSqlQuery 默认找 default 连接（本项目无默认连接）
@@ -152,8 +152,8 @@ void LoginTask::run() {
 		}
 	}
 
-	//验证成功 → 打包通讯录快照（随登录响应一并下发）
 	if (result == "1") {
+		//验证成功 → 打包通讯录快照（随登录响应一并下发）
 		QByteArray snapshot = this->buildContactSnapshot();
 		qDebug() << QStringLiteral("[LoginTask] fd=%1 登录验证成功，uid=%2").arg(m_descriptor).arg(empID);
 		emit m_signals->loginVerified(m_descriptor, true, empID.toInt(), snapshot);
@@ -338,5 +338,47 @@ void GroupMembersTask::run() {
 
 
 //---------- PullTask ----------
-// TODO(你来实现，后续完善）：逐会话分页拉取（实现要点见 ServerTask.h 文件底部 PullTask TODO 注释）
-// ------------------------------------------------------------------------------------------------------------------------------
+
+PullTask::PullTask(int descriptor, int uid, const QHash<int, quint64>& cursors, TaskSignals* taskSignals)
+	: m_descriptor(descriptor), m_uid(uid), m_cursors(cursors), m_signals(taskSignals)
+{
+}
+
+void PullTask::run() {
+	//逐会话增量拉取：空 cursors 不查库
+
+	QList<QByteArray> messages;		//预封好的消息列表
+
+	if (m_cursors.isEmpty() == false) {
+		QSqlDatabase db = DbConnPool::getInstance().get();		//惰性建连：空 cursors 不碰数据库
+		QSqlQuery query(db);		//★ 必须显式传 db（本项目无默认连接）
+
+		for (auto it = m_cursors.begin(); it != m_cursors.end(); ++it) {
+			//逐会话查询：seq > 游标 的积压消息（走 idx_conv_seq 索引，按 seq 升序取一页）
+			query.prepare("SELECT `msg_id`, `seq`, `content` FROM `tab_msg` "
+				"WHERE `recv_id` = ? AND `conv_id` = ? AND `seq` > ? ORDER BY `seq` ASC LIMIT ?");
+			query.addBindValue(m_uid);
+			query.addBindValue(it.key());
+			query.addBindValue(it.value());
+			query.addBindValue(PULL_PAGE_SIZE);
+			query.exec();		//exec 失败该会话收集不到数据（while 不进），不回传即降级
+
+			while (query.next() == true) {
+				//池线程直接预封协议字段：[convId 5B|seq 10B|msgId 13B|载荷]
+				//（rightJustified 补零与客户端封包/解析偏移严格互逆；msgId 天然 13 位定宽原样；
+				//  载荷原文 = [群标志|发送者|接收者|类型|内容]，Pull 时原样下发）
+				QByteArray item = QString::number(it.key()).rightJustified(CONV_LEN, '0').toUtf8();
+				item += QString::number(query.value(1).toULongLong()).rightJustified(SEQ_LEN, '0').toUtf8();
+				item += query.value(0).toString().toUtf8();		//msgId
+				item += query.value(2).toByteArray();			//载荷原文
+				messages << item;
+			}
+		}
+	}
+
+	//空结果也要 emit（客户端据"条数 0"停止续拉——这是续拉循环的终止信号）
+	emit m_signals->pullLoaded(m_descriptor, messages);
+}
+
+//=======================================================================================================================
+

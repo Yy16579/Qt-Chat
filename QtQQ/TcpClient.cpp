@@ -140,8 +140,7 @@ void TcpClient::connectToServer() {
 					this->m_reconnectTimer->stop();		//封存可能挂起的重连定时器
 				}
 				else {
-					//pending 全体停表（挂起）：消息未确认责任未了，等重连 flush；
-					//只停表不清表——attempts 冻结，重连 flush 时归零重计
+					//pending 全体停表（挂起）：消息未确认责任未了，等重连 flush
 					for (auto it = this->m_pending.begin(); it != this->m_pending.end(); ++it) {
 						it.value().timer->stop();
 					}
@@ -163,8 +162,10 @@ bool TcpClient::isConnected() const {
 }
 
 bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file) {
-	// 拼接内层（群标识 + 发送方ID + 接收方ID + 消息类型 + 消息内容）
-	
+	//拼接内层消息包（ msgId + seq + 群标识 + 发送方ID + 接收方ID + 消息类型 + 消息内容）
+	//加入待确认表
+	//启动超时重传计时器
+
 	//接收到的参数：
 	//		例1（纯表情）   :		(0, "1images023")	
 	//		例2（纯文本）   :		(1, "你好")
@@ -194,8 +195,6 @@ bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 	}
 
 	//拼接内部数据
-	QString strSend;		//内部数据包
-
 	//数据包字段
 	QString strGroupFlag = groupFlag ? "1" : "0";	//群聊标志，0私聊 1群聊
 	//ID 按协议定宽补零（右对齐左补零），与收发两端的定长切分对齐
@@ -233,31 +232,23 @@ bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 
 	}
 
-	//拼接内层数据包（文本格式）
-	strSend = strGroupFlag + strSendID + strRecvID + strDataType + strData;
-
-	// === 发送侧可靠性（超时重传）====================================================================================
-	// 数据体 = [msgId 13B][seq 10B][载荷]（载荷部分与旧格式一致，服务端按新格式解析）
-
-	// 1. msgId 生成：uid后3位 + 毫秒时间戳后10位（13位定宽十进制，幂等键）
-	//    撞号条件 = 同用户同毫秒双发（物理操作达不到，接受该理论缝隙）
+	// msgId 生成：m_empID后3位 + 毫秒时间戳后10位（13位定宽十进制）
 	QString msgId = QString::number(WindowManager::getInstance().m_empID % 1000).rightJustified(3, '0')
 		+ QString::number(QDateTime::currentMSecsSinceEpoch() % 10000000000LL).rightJustified(10, '0');
 
-	// 2. 取号：convId 与服务端对称（私聊=对方uid / 群聊=群号）
-	//    ++m_sendCounter：点击一次取一个号（号在点击瞬间冻结，网络/重传不改号）
-	int convId = groupFlag ? recvID : sendID;
-	quint64 seq = ++this->m_sendCounter[convId];
-	this->saveSeqState(convId);		//取号机即时写盘（防重启撞号）
+	// seq 取号：序列号在点击瞬间冻结
+	quint64 seq = ++this->m_sendCounter[recvID];
+	this->saveSeqState(recvID);				//取号后即时写入配置文件（防重启撞号）
 
-	// 3. 组装数据体并发出（现有接口，行为不变）
+	//组装数据体并发出
+	QString strSend = strGroupFlag + strSendID + strRecvID + strDataType + strData;
 	QByteArray body = msgId.toUtf8()
 		+ QString::number(seq).rightJustified(SEQ_LEN, '0').toUtf8()
 		+ strSend.toUtf8();
 	this->sendPacket(static_cast<quint16>(PacketType::Message), body);
 
-	// 4. 注册 pending 表 + 启动 3s 重传定时器（无 ACK 则 3/6/12s 有界重传 3 次）
-	//    存数据体而非整包：重传时再喂给 sendPacket 重封包头（包头是确定性拼接，同输入同输出）
+	//消息重传机制：
+	//注册 pending 表 + 启动 3s 重传定时器（无 ACK 则 3/6/12s 有界重传 3 次）
 	PendingMsg pending;
 	pending.packet = body;
 	pending.msgId = msgId;
@@ -265,8 +256,6 @@ bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 	pending.timer = new QTimer(this);
 	pending.timer->setSingleShot(true);
 	connect(pending.timer, &QTimer::timeout, this, [this, msgId]() {
-		//重传到期分流（lambda 内联，不占函数声明）
-
 		//条目可能已被 ACK 移除（停表与 timeout 的竞态兜底）
 		if (!this->m_pending.contains(msgId)) {
 			return;
@@ -297,11 +286,24 @@ bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 		p.timer->start(intervals[qMin(p.attempts, 2)]);
 		qDebug() << QStringLiteral("[Send] msgId=%1 第%2次重传").arg(msgId).arg(p.attempts);
 	});
-	pending.timer->start(3 * 1000);
+	pending.timer->start(3 * 1000);			//启动超时重传计时器
 	this->m_pending.insert(msgId, pending);
-	qDebug() << QStringLiteral("[Send] msgId=%1 conv=%2 seq=%3 已发出，pending=%4")
-		.arg(msgId).arg(convId).arg(seq).arg(this->m_pending.size());
-	// =================================================================================================================
+
+	qDebug() << QStringLiteral("[Send] msgId=%1 conv=%2 seq=%3 已发出，pending=%4").arg(msgId).arg(recvID).arg(seq).arg(this->m_pending.size());
+
+	return true;		//成功发出（bool 返回值：false = 未连接/超长，调用方据此决定是否入本地库）
+}
+
+void TcpClient::sendPullRequest(int singleConvId) {
+	//拉取请求：获取账本快照 → 发送（触发源：敲门/登录/补拉/续拉）
+	//singleConvId（会话ID） = -1 → 拉取全部会话；否则只拉取该会话（定点补拉用）
+
+	//状态检查：断线瞬间触发的 pull 直接丢弃（敲门丢失无后果，心跳对账兜底）
+	if (!m_tcpClientSocket || m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
+		return;
+	}
+	QByteArray body = this->buildCursorTable(singleConvId);
+	this->sendPacket(static_cast<quint16>(PacketType::PullRequest), body);
 }
 
 void TcpClient::sendLoginRequest(const QString& account, const QString& password) {
@@ -374,8 +376,13 @@ void TcpClient::sendHeartbeat() {
 		return;
 	}
 
-	//未超时：发送心跳包（空载荷）
-	this->sendPacket(static_cast<quint16>(PacketType::Heartbeat), QByteArray());
+	//未超时：发送心跳包（未登录 = 空载荷纯保活；已登录 = 带账本对账，落后会被服务端敲门）
+	if (this->m_loggedIn == false) {
+		this->sendPacket(static_cast<quint16>(PacketType::Heartbeat), QByteArray());
+	}
+	else {
+		this->sendPacket(static_cast<quint16>(PacketType::Heartbeat), this->buildCursorTable(-1));
+	}
 }
 
 void TcpClient::sendPacket(quint16 packetType, const QByteArray& dataBody) {
@@ -457,44 +464,10 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 	QByteArray dataBody = packet.mid(PACKET_HEADER_SIZE);
 
 	// 5. 按包类型分发业务 ============================================================================================
-	if (packetType == static_cast<quint16>(PacketType::Message)) {
-		// ===== 消息包 =====
-		// 解析内层（群标志 + 发送者ID + 接收者ID + 消息类型 + 消息内容）
-		if (dataBody.size() < 11) {
-			//最小头：群聊 1+5+4+1 = 11字节
-			qDebug() << QStringLiteral("[Message] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
-			return;
-		}
+	if (packetType == static_cast<quint16>(PacketType::PullResponse)) {
+		
 
-		// 消息字段
-		int groupFlag = dataBody[0] - '0';		//群标志：0私聊 1群聊
-		int sendId = dataBody.mid(1, 5).toInt();	//发送者ID
-		int recvId = 0;		//接收者ID
-		int msgType = 0;	//消息类型
-		QString msg;		//消息内容
 
-		if (groupFlag == 0) {
-			//私聊：接收者ID占5位，消息类型在偏移11
-			if (dataBody.size() < 12) {
-				qDebug() << QStringLiteral("[Message] 私聊数据体过短(%1字节)，丢弃").arg(dataBody.size());
-				return;
-			}
-			recvId = dataBody.mid(6, 5).toInt();
-			msgType = dataBody.mid(11, 1).toInt();
-			msg = QString::fromUtf8(dataBody.mid(12));
-		}
-		else {
-			//群聊：接收者为4位群ID，消息类型在偏移10
-			recvId = dataBody.mid(6, 4).toInt();
-			msgType = dataBody.mid(10, 1).toInt();
-			msg = QString::fromUtf8(dataBody.mid(11));
-		}
-
-		qDebug() << QStringLiteral("[Message] 收到消息：%1 → %2，类型%3")
-			.arg(sendId).arg(recvId).arg(msgType);
-
-		//解析完成，发射信号交给 UI 层（TalkWindow）显示
-		emit this->signalMessageReceived(groupFlag, sendId, recvId, msgType, msg);
 	}
 	else if (packetType == static_cast<quint16>(PacketType::LoginResponse)) {
 		// ===== 登录响应包 =====
@@ -519,14 +492,14 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 			//成功登录
 			this->m_loggedIn = true;
 
-			//取号机状态载入
-			this->loadSeqState(empID);
-
 			//提取通讯录快照：6字节定长头（结果1B+uid5B）之后的附加数据
 			//必须先填缓存再 emit——emit 后 UserLogin 会立即 new CCMainWindow 查询缓存
 			if (dataBody.size() > 6) {
 				ContactBook::getInstance().loadFromJson(dataBody.mid(6));
 			}
+
+			//消息发送 seq 表状态载入
+			this->loadSeqState(empID);
 		}
 
 		//解析完成，发射信号交给 UI 层（UserLogin）处理界面跳转
@@ -552,7 +525,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 	else if (packetType == static_cast<quint16>(PacketType::MessageAck)) {
 		// ===== 投递确认包 =====
 		// 数据体 = msgId 13B：服务端入库成功的回执（含幂等命中——重传的重复包也算成功）
-		// 收到即移除 pending 条目 + 停重传定时器（上行可靠性闭环）
+		// 收到即移除 pending 条目 + 停重传定时器
 		if (dataBody.size() < MSGID_LEN) {
 			qDebug() << QStringLiteral("[MessageAck] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
 			return;
@@ -560,7 +533,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 
 		QString msgId = QString::fromUtf8(dataBody.left(MSGID_LEN));
 		if (this->m_pending.contains(msgId)) {
-			//命中：停表销毁 + 移除条目（remove 后不再碰引用）
+			//命中：停表销毁 + 移除条目
 			qDebug() << QStringLiteral("[MessageAck] msgId=%1 已投递，移除 pending（剩 %2 条）")
 				.arg(msgId).arg(this->m_pending.size() - 1);
 			this->m_pending[msgId].timer->stop();
@@ -571,6 +544,11 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 			//迟到 ACK（对应已耗尽移除/已 flush 的条目），无害忽略
 			qDebug() << QStringLiteral("[MessageAck] msgId=%1 无对应 pending（迟到ACK），忽略").arg(msgId);
 		}
+	}
+	else if (packetType == static_cast<quint16>(PacketType::MsgNotify)) {
+		// ===== 敲门包 =====
+		// 服务端通知"有新消息"（数据体为空，纯信令）：整表拉取积压
+		this->sendPullRequest(-1);
 	}
 	// ================================================================================================================
 }
@@ -645,41 +623,80 @@ void TcpClient::onLoginResponseInternal(bool result, int empID) {
 		emit this->signalReconnected();
 
 		//pending 全表 flush 重发：断线期间未确认的消息重新投递
-		//（服务端 uk_recv_msg 幂等——重连前已入库的消息不会重复，未入库的这次补上）
 		this->flushPending();
 	}
 }
 
 
-// ===== 发送侧可靠性（超时重传 + 取号机持久化）=========================================================================
+// ===== seq 可靠性（发送取号机 + 接收账本）===============================================================================
 
 void TcpClient::loadSeqState(int empID) {
-	//登录成功时读回取号机（seq_<empID>.ini，按账号分文件换号天然隔离）
-	//首次登录无键 → 空 QMap → 取号从 1 起（新会话新序号空间）
+	//登录成功时读取配置文件（seq_<empID>.ini，按账号分文件换号天然隔离）
+	//首次登录无键 → 空表 → 取号从 1 起 / 账本从 0 起（新会话新序号空间）
 
 	this->m_sendCounter.clear();
+	this->m_ledger.clear();		//★ 先清空再加载（防上一账号残留）
 
-	QSettings settings(QStringLiteral("seq_%1.ini").arg(empID), QSettings::IniFormat);
+	//ini 与 config.ini 同放 exe 目录（双击 exe / IDE 启动的工作目录不同，相对路径会散落两处）
+	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini").arg(empID);
+	QSettings settings(path, QSettings::IniFormat);
 	for (const QString& key : settings.allKeys()) {
-		//键格式：Send/<convId>
+		//键格式：Send/<convId> 或 Ledger/<convId>
 		QStringList parts = key.split('/');
-		if (parts.size() != 2 || parts.at(0) != QStringLiteral("Send")) {
+		if (parts.size() != 2) {
 			continue;
 		}
-		this->m_sendCounter[parts.at(1).toInt()] = settings.value(key).toULongLong();
+		if (parts.at(0) == QStringLiteral("Send")) {
+			this->m_sendCounter[parts.at(1).toInt()] = settings.value(key).toULongLong();
+		}
+		else if (parts.at(0) == QStringLiteral("Ledger")) {
+			this->m_ledger[parts.at(1).toInt()] = settings.value(key).toULongLong();
+		}
 	}
-	qDebug() << QStringLiteral("[Seq] 取号机载入完成：uid=%1，共 %2 个会话")
-		.arg(empID).arg(this->m_sendCounter.size());
+	qDebug() << QStringLiteral("[Seq] seq 表载入完成：uid=%1，取号机 %2 个会话，账本 %3 个会话")
+		.arg(empID).arg(this->m_sendCounter.size()).arg(this->m_ledger.size());
 }
 
 void TcpClient::saveSeqState(int convId) {
-	//取号时同步写盘（防崩溃窗口：取了号没写盘就崩溃，重启读回旧号 → 撞号）
-	//文件名用 WindowManager m_empID——调用时必在聊天态，主窗口已构造
-	QSettings settings(QStringLiteral("seq_%1.ini")
-		.arg(WindowManager::getInstance().m_empID), QSettings::IniFormat);
+	//发送消息时同步写入配置文件（防崩溃窗口：取了号没写盘就崩溃，重启读回旧号 → 撞号）
+	//（与 loadSeqState 同放 exe 目录，防工作目录漂移导致读写两个文件）
+	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini")
+		.arg(WindowManager::getInstance().m_empID);
+	QSettings settings(path, QSettings::IniFormat);
 	settings.setValue(QStringLiteral("Send/%1").arg(convId),
 		QString::number(this->m_sendCounter.value(convId)));
 	settings.sync();		//立即落盘
+}
+
+void TcpClient::saveLedgerState(int convId) {
+	//消息渲染落账时同步写入（防崩溃窗口：账本内存推进了没写盘就崩溃，重启读回旧游标 → 重复拉取，靠 msgId 去重兜底）
+	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini")
+		.arg(WindowManager::getInstance().m_empID);
+	QSettings settings(path, QSettings::IniFormat);
+	settings.setValue(QStringLiteral("Ledger/%1").arg(convId),
+		QString::number(this->m_ledger.value(convId)));
+	settings.sync();		//立即落盘
+}
+
+QByteArray TcpClient::buildCursorTable(int singleConvId) {
+	//创建账本快照：[会话数 2B] + N × [convId 5B][游标 10B]，全部十进制补零
+	//singleConvId（会话ID） = -1 → 报全部会话；否则只报该会话（定点补拉用）
+
+	QMap<int, quint64> report;		//本次上报的会话子集
+	if (singleConvId == -1) {
+		report = this->m_ledger;
+	}
+	else {
+		report.insert(singleConvId, this->m_ledger.value(singleConvId, 0));		//无记录 = 游标 0（从头拉）
+	}
+
+	QString strCount = QString::number(report.size()).rightJustified(2, '0');	//会话数 2B
+	QStringList entries;
+	for (auto it = report.begin(); it != report.end(); ++it) {
+		entries << QString::number(it.key()).rightJustified(CONV_LEN, '0')
+			+ QString::number(it.value()).rightJustified(SEQ_LEN, '0');
+	}
+	return (strCount + entries.join(QString())).toUtf8();
 }
 
 void TcpClient::flushPending() {

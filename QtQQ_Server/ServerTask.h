@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QRunnable>
 #include <QList>
+#include <QByteArray>
 #include <QtGlobal>
 
 
@@ -65,11 +66,8 @@ signals:
 	//memberIds = 实际入库的成员列表（已跳过发送者本人）；convId = 群号；seq = 整批共用的会话内序号
 	void groupMsgStored(int descriptor, const QString& msgId, bool ok, const QList<int>& memberIds, int convId, quint64 seq);
 
-	// TODO(你来实现)：pullLoaded —— PullTask（分页拉取查询）的结果回执
-	//    建议配套：struct PullMsg { int convId; quint64 seq; QString msgId; QByteArray content; } + Q_DECLARE_METATYPE
-	//    信号签名：void pullLoaded(int descriptor, const QList<PullMsg>& messages);
-	//    语义：主线程封 PullResponse 包（[条数1B]+N×[convId5B|seq10B|msgId13B|载荷]）发给客户端
-	//    ★ 跨线程信号传 QList 自定义类型：需在 TcpServer 构造里 qRegisterMetaType<QList<PullMsg>>()（否则队列连接丢参数）
+	//PullTask 拉取结果回执：messages = 每条消息已预封好的协议字段 [convId 5B|seq 10B|msgId 13B|载荷]
+	void pullLoaded(int descriptor, const QList<QByteArray>& messages);
 };
 
 
@@ -80,6 +78,7 @@ signals:
 //   3. run() 第一行拿本线程专属连接，QSqlQuery 必须显式传 db（本项目无默认连接）
 //   4. 任务由 QThreadPool 接管，run() 结束后自动 delete（autoDelete 默认 true）
 //   5. 任务只碰数据库和纯数据，绝不碰 socket / 路由表（线程亲和性铁律）
+
 
 //---------- DbCheckTask：启动自检任务 ----------
 // 服务端启动时投一个到池：试连 MySQL，结果回传主线程打印
@@ -155,13 +154,23 @@ private:
 };
 
 
+//---------- PullTask：增量拉取任务 ----------
+// 职责：逐会话增量拉取（seq 方案，N 会话 N 条 SQL）→ 每条消息预封 [convId 5B|seq 10B|msgId 13B|载荷] 存入 QList<QByteArray> 回传
+// 主线程拿到直接拼盘转发（条数头 + 顺序 append）；空结果也要 emit（客户端据"条数 0"停止续拉）
+// 空 cursors（"00" 包）→ 不查库直接 emit 空结果（微信式决策：无全量拉取，服务端只按表办事）
+class PullTask : public QRunnable {
+public:
+	PullTask(int descriptor, int uid, const QHash<int, quint64>& cursors, TaskSignals* taskSignals);
 
-//---------- PullTask：分页拉取任务（TODO 你来实现，后续完善） ----------
-// 职责：逐会话分页拉取（seq 方案，N 会话 N 条 SQL）
-// 构造参数建议：int descriptor、int uid（= socket->getUid()）、QHash<int, quint64> cursors（客户端整张游标表）、TaskSignals*
-// run()：遍历 cursors，逐会话执行
-//   SELECT `msg_id`, `seq`, `content` FROM `tab_msg`
-//     WHERE `recv_id` = ? AND `conv_id` = ? AND `seq` > ? ORDER BY `seq` ASC LIMIT 20
-//   → 汇总 QList<PullMsg>（配套 struct 见 TaskSignals 的 pullLoaded TODO）→ emit m_signals->pullLoaded(descriptor, messages)
-// 注意：空结果也要 emit（客户端据"条数 0"知道没有更多了，停止续拉）
-// ----------------------------------------------------------------------------------------------------------------------
+	void run() override;
+
+private:
+	int m_descriptor;					//来源连接的 fd
+	int m_uid;							//发起拉取的用户 uid（= socket->getUid()）
+	QHash<int, quint64> m_cursors;		//接收端账本（会话ID → 消息接收 seq ）
+	TaskSignals* m_signals;				//结果回传器
+};
+
+//==================================================================================================================================
+
+
