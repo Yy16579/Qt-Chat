@@ -62,11 +62,11 @@ enum class PacketType : quint16 {
 
     // === 下行数据通道（服务器 → 客户端）0x03xx ===
     PullResponse    = 0x0301,   // 拉取响应（消息本体唯一出口！）
-                                // 数据体 = [条数 1B] + N × [convId 5B][seq 10B][msgId 13B | 消息载荷]
-                                // 消息载荷 = [群标志1B][发送者5B][接收者4~5B][类型1B][内容...]（与上行同构）
+                                // 数据体 = JSON {"count":N,"msgs":[{"convId":"..","seq":"..","msgId":"..","payload":"base64"}...]}
+                                // convId/seq/msgId 字符串承载（quint64 防精度损失）；payload = 上行载荷原文 base64
                                 // 客户端逐条校验 seq == 账本[convId]+1：命中渲染落账 / 落后丢弃（重复）/
                                 // 超前发现空洞 → 该消息进乱序缓冲区 + 单会话定点补拉（游标=当前账本，500ms×5 次）
-                                // 收满 PULL_PAGE_SIZE 条自动续拉
+                                // 续拉由服务端驱动：满页（count ≥ PULL_PAGE_SIZE）敲门，客户端重新全表拉取
 
     // === 其他 0x04xx / 0xFFxx ===
     DbQuery         = 0x0401,   // 数据库查询请求

@@ -225,6 +225,8 @@ void TalkWindow::replayHistory() {
 
 //槽函数
 void TalkWindow::onMsgSend(const QString& msg, int msgType, const QString file) {
+	//消息发送流程：拼接 msgId + seq 等字段 / 向服务端发送 / 加入待确认表（启动重传计时器） / 加入本地仓库 
+	
 	//向服务端发送消息数据
 	int sendID = WindowManager::getInstance().m_empID;
 

@@ -3,6 +3,8 @@
 #include <QDebug>
 #include <QtEndian>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 
 TcpServer::TcpServer(int port)
@@ -407,8 +409,8 @@ void TcpServer::onDbChecked(bool ok, const QString& error) {
 	}
 }
 
-void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot) {
-	//LoginTask 结果处理：回发响应包 / 踢下线 / 绑路由
+void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs) {
+	//LoginTask 结果处理：回发响应包 / 重建会话高水位 / 踢下线 / 绑路由
 
 	// 竞态防护：验证在途期间（MySQL 慢）客户端可能已断开，结果作废
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
@@ -425,6 +427,15 @@ void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArr
 	else {
 		QByteArray body = "1" + QString::number(uid).rightJustified(5, '0').toUtf8() + snapshot;
 		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, socket);
+	}
+
+	// 重建会话高水位：DB 权威值合并进内存表（if seq > max 单调推进，不覆盖运行期更高值）
+	//（服务端重启丢内存后靠每个用户登录增量自愈——合并需在登录自动 Pull 到达前完成，
+	//  本槽与 PullRequest 处理同在主线程事件队列，响应先发 Pull 后到，时序天然满足）
+	for (auto it = maxSeqs.begin(); it != maxSeqs.end(); ++it) {
+		if (it.value() > this->m_convMaxSeq[uid][it.key()]) {
+			this->m_convMaxSeq[uid][it.key()] = it.value();
+		}
 	}
 
 	// 绑定路由表
@@ -501,9 +512,9 @@ void TcpServer::onGroupMsgStored(int descriptor, const QString& msgId, bool ok, 
 		.arg(convId).arg(seq).arg(memberIds.size()).arg(knocked);
 }
 
-void TcpServer::onPullLoaded(int descriptor, const QList<QByteArray>& messages) {
-	//PullTask 拉取结果 → 拼盘下发（消息本体唯一出口）
-	//池线程已把每条消息预封成 [convId 5B|seq 10B|msgId 13B|载荷]，主线程纯搬运
+void TcpServer::onPullLoaded(int descriptor, const QByteArray& dataBody) {
+	//PullTask 拉取结果 → 下发（消息本体唯一出口）
+	//池线程已封装完整 JSON 数据体，主线程纯转发不加工
 
 	//竞态防护：任务在途期间客户端可能已断开，结果作废
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
@@ -512,16 +523,20 @@ void TcpServer::onPullLoaded(int descriptor, const QList<QByteArray>& messages) 
 		return;
 	}
 
-	//拼数据体：[条数 1B] + N 条预封消息顺序 append（不拆不重拼）
-	//条数超 255 截断（协议 1B 上限；截断部分客户端下轮续拉补齐——收满 PULL_PAGE_SIZE 会续拉）
-	int sendCount = qMin(messages.size(), 255);
-	QByteArray dataBody;
-	dataBody.append(static_cast<char>(sendCount));
-	for (int i = 0; i < sendCount; ++i) {
-		dataBody.append(messages.at(i));
-	}
-
 	this->sendPacket(static_cast<quint16>(PacketType::PullResponse), dataBody, socket);
-	qDebug() << QStringLiteral("[Pull] fd=%1 拉取下发 %2 条").arg(descriptor).arg(sendCount);
+	qDebug() << QStringLiteral("[Pull] fd=%1 拉取下发完成（%2 字节）").arg(descriptor).arg(dataBody.size());
+
+	//满页敲门 = 续拉驱动：count 达到分页阈值 → 该用户可能仍有积压
+	//（count 是全部会话合计：多会话合计超阈值会多敲一轮空转，无害自终止；
+	//60KB 字节截断场景 count 可能不满页，剩余积压靠心跳对账 30s 兜底）
+	//紧随 PullResponse 之后（同 socket FIFO：客户端先处理完消息账本推进、再收敲门，游标从断点继续）
+	if (dataBody.isEmpty() == false) {
+		QJsonDocument doc = QJsonDocument::fromJson(dataBody);
+		if (doc.isObject() == true && doc.object().value("count").toInt() >= PULL_PAGE_SIZE) {
+			this->sendPacket(static_cast<quint16>(PacketType::MsgNotify), QByteArray(), socket);
+			qDebug() << QStringLiteral("[Pull] fd=%1 满页(%2条)，敲门续拉").arg(descriptor)
+				.arg(doc.object().value("count").toInt());
+		}
+	}
 }
 

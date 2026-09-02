@@ -38,6 +38,7 @@ public:
 	QList<int> groupMembers(int depID) const;		//群成员列表：公司群 → 全部员工；部门群 → 按部门过滤
 	EmployeeInfo employeeInfo(int empID) const;		//员工信息（查无返回默认空值）
 	DepartmentInfo departmentInfo(int depID) const;	//部门信息（查无返回默认空值）
+	QList<int> allConvIds() const;					//全部会话 ID 清单（员工 uid + 部门/群 depID）——登录账本补零用
 
 private:
 	ContactBook();

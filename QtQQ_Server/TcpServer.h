@@ -57,12 +57,13 @@ private slots:
 	// 池任务结果槽 =========================================================================================
 	// 公共模式：开头查 m_fdSocketMap 判空——任务在途期间客户端可能已断开，结果作废（竞态防护）
 	void onDbChecked(bool ok, const QString& error);											// DbCheckTask：启动自检结果打印
-	void onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot);			// LoginTask：回发响应/互踢/绑路由
+	void onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot,
+						const QHash<int, quint64>& maxSeqs);										// LoginTask：回发响应/同步账本/互踢/绑路由
 	void onMsgStored(int descriptor, const QString& msgId, bool ok, 
 						int recvId, int convId, quint64 seq);									// StoreMsgTask：回 ACK / 更新会话消息最大 seq / 敲门
 	void onGroupMsgStored(int descriptor, const QString& msgId, bool ok,
 						const QList<int>& memberIds, int convId, quint64 seq);					// GroupMembersTask：回 ACK / 更新会话消息最大 seq / 敲门
-	void onPullLoaded(int descriptor, const QList<QByteArray>& messages);						// PullTask：消息下发
+	void onPullLoaded(int descriptor, const QByteArray& dataBody);								// PullTask：消息下发（JSON 数据体纯转发）
 	// ======================================================================================================
 
 private:

@@ -153,14 +153,24 @@ void LoginTask::run() {
 	}
 
 	if (result == "1") {
+		//验证成功 → 同步该用户账本（convId → MAX(seq)，DB 权威值）
+		QHash<int, quint64> maxSeqs;
+		query.prepare("SELECT `conv_id`, MAX(`seq`) FROM `tab_msg` WHERE `recv_id` = ? GROUP BY `conv_id`");
+		query.addBindValue(empID.toInt());
+		query.exec();
+		while (query.next() == true) {
+			maxSeqs.insert(query.value(0).toInt(), query.value(1).toULongLong());
+		}
+
 		//验证成功 → 打包通讯录快照（随登录响应一并下发）
 		QByteArray snapshot = this->buildContactSnapshot();
-		qDebug() << QStringLiteral("[LoginTask] fd=%1 登录验证成功，uid=%2").arg(m_descriptor).arg(empID);
-		emit m_signals->loginVerified(m_descriptor, true, empID.toInt(), snapshot);
+		qDebug() << QStringLiteral("[LoginTask] fd=%1 登录验证成功，uid=%2 高水位 %3 个会话")
+			.arg(m_descriptor).arg(empID).arg(maxSeqs.size());
+		emit m_signals->loginVerified(m_descriptor, true, empID.toInt(), snapshot, maxSeqs);
 	}
 	else {
 		qDebug() << QStringLiteral("[LoginTask] fd=%1 账号密码验证失败").arg(m_descriptor);
-		emit m_signals->loginVerified(m_descriptor, false, -1, QByteArray());
+		emit m_signals->loginVerified(m_descriptor, false, -1, QByteArray(), QHash<int, quint64>());
 	}
 }
 
@@ -346,8 +356,13 @@ PullTask::PullTask(int descriptor, int uid, const QHash<int, quint64>& cursors, 
 
 void PullTask::run() {
 	//逐会话增量拉取：空 cursors 不查库
+	//结果封装为 JSON 数据体：字段边界天然清晰，主线程纯转发不加工
+	//格式 = {"count":N,"msgs":[{"convId":"..","seq":"..","msgId":"..","payload":"base64"}...]}
+	//convId/seq/msgId 用字符串承载（不依赖定长补零；QJsonValue 数值有 double 精度上限，quint64 序号一律字符串）
+	//payload = 消息载荷原文（[群标志|发送者|接收者|类型|内容]）base64 编码（DB/上行二进制协议零改动）
 
-	QList<QByteArray> messages;		//预封好的消息列表
+	QJsonArray msgs;			//本次拉取的消息数组
+	qint64 estBytes = 0;		//数据体估算大小（防 64KB 外层长度头溢出）
 
 	if (m_cursors.isEmpty() == false) {
 		QSqlDatabase db = DbConnPool::getInstance().get();		//惰性建连：空 cursors 不碰数据库
@@ -364,20 +379,28 @@ void PullTask::run() {
 			query.exec();		//exec 失败该会话收集不到数据（while 不进），不回传即降级
 
 			while (query.next() == true) {
-				//池线程直接预封协议字段：[convId 5B|seq 10B|msgId 13B|载荷]
-				//（rightJustified 补零与客户端封包/解析偏移严格互逆；msgId 天然 13 位定宽原样；
-				//  载荷原文 = [群标志|发送者|接收者|类型|内容]，Pull 时原样下发）
-				QByteArray item = QString::number(it.key()).rightJustified(CONV_LEN, '0').toUtf8();
-				item += QString::number(query.value(1).toULongLong()).rightJustified(SEQ_LEN, '0').toUtf8();
-				item += query.value(0).toString().toUtf8();		//msgId
-				item += query.value(2).toByteArray();			//载荷原文
-				messages << item;
+				//字节保护：估算超 60KB 停止追加（外层长度头 quint16 上限 64KB）
+				//截断的消息留在库里，客户端下轮心跳对账发现落后再敲门续拉
+				estBytes += query.value(2).toByteArray().size() * 4 / 3 + 60;
+				if (estBytes > 60000) {
+					break;
+				}
+
+				QJsonObject msg;
+				msg.insert("convId", QString::number(it.key()));
+				msg.insert("seq", QString::number(query.value(1).toULongLong()));
+				msg.insert("msgId", query.value(0).toString());
+				msg.insert("payload", QString::fromLatin1(query.value(2).toByteArray().toBase64()));
+				msgs.append(msg);
 			}
 		}
 	}
 
 	//空结果也要 emit（客户端据"条数 0"停止续拉——这是续拉循环的终止信号）
-	emit m_signals->pullLoaded(m_descriptor, messages);
+	QJsonObject root;
+	root.insert("count", msgs.size());
+	root.insert("msgs", msgs);
+	emit m_signals->pullLoaded(m_descriptor, QJsonDocument(root).toJson(QJsonDocument::Compact));
 }
 
 //=======================================================================================================================

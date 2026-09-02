@@ -56,7 +56,9 @@ signals:
 	void dbChecked(bool ok, const QString& error);
 
 	//登录验证完成：ok = 账密是否验证通过；snapshot = 通讯录快照 JSON（验证失败为空）
-	void loginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot);
+	//maxSeqs = 该用户各会话 DB 权威高水位（convId → MAX(seq)，验证失败为空表）——
+	//          用于登录时重建 m_convMaxSeq（服务端重启丢内存高水位后，靠每个用户登录增量自愈）
+	void loginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs);
 
 	//私聊消息入库完成：
 	//ok = INSERT 成败；convId = 会话键（私聊=发送者 uid）；seq = 会话内序号（客户端取号机分配，服务端只透传）
@@ -66,8 +68,9 @@ signals:
 	//memberIds = 实际入库的成员列表（已跳过发送者本人）；convId = 群号；seq = 整批共用的会话内序号
 	void groupMsgStored(int descriptor, const QString& msgId, bool ok, const QList<int>& memberIds, int convId, quint64 seq);
 
-	//PullTask 拉取结果回执：messages = 每条消息已预封好的协议字段 [convId 5B|seq 10B|msgId 13B|载荷]
-	void pullLoaded(int descriptor, const QList<QByteArray>& messages);
+	//PullTask 拉取结果回执：dataBody = 已封好的完整 JSON 数据体（主线程纯转发不加工）
+	//格式 = {"count":N,"msgs":[{"convId":"..","seq":"..","msgId":"..","payload":"base64"}...]}
+	void pullLoaded(int descriptor, const QByteArray& dataBody);
 };
 
 
@@ -155,9 +158,8 @@ private:
 
 
 //---------- PullTask：增量拉取任务 ----------
-// 职责：逐会话增量拉取（seq 方案，N 会话 N 条 SQL）→ 每条消息预封 [convId 5B|seq 10B|msgId 13B|载荷] 存入 QList<QByteArray> 回传
-// 主线程拿到直接拼盘转发（条数头 + 顺序 append）；空结果也要 emit（客户端据"条数 0"停止续拉）
-// 空 cursors（"00" 包）→ 不查库直接 emit 空结果（微信式决策：无全量拉取，服务端只按表办事）
+// 职责：逐会话增量拉取（seq 方案，N 会话 N 条 SQL）→ 池线程直接封装完整 JSON 数据体回传
+// {"count":N,"msgs":[{"convId":"..","seq":"..","msgId":"..","payload":"base64"}...]}，主线程纯转发不加工
 class PullTask : public QRunnable {
 public:
 	PullTask(int descriptor, int uid, const QHash<int, quint64>& cursors, TaskSignals* taskSignals);

@@ -118,4 +118,12 @@ DepartmentInfo ContactBook::departmentInfo(int depID) const {
 	return this->m_departments.value(depID);
 }
 
+QList<int> ContactBook::allConvIds() const {
+	//全部会话 ID 清单：私聊会话 = 员工 uid，群聊会话 = 部门/公司群 depID
+	//（供登录时账本补零——空账本开不出 Pull 清单，服务端按表办事会拉空）
+	QList<int> ids = this->m_employees.keys();
+	ids += this->m_departments.keys();
+	return ids;
+}
+
 
