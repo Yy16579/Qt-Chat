@@ -23,24 +23,26 @@ constexpr quint8 PACKET_VERSION = 1;
 //       + MessageAck 回执凭据（发送端 pending 表按 msgId 记账，收 ACK 停重传定时器）
 constexpr int MSGID_LEN = 13;
 
-// seq 定长：10位十进制 = 会话内连续序号（客户端"取号机"分配：每会话独立计数，点击发送瞬间取号）
+// seq 定长：10位十进制 = 会话内连续序号（服务端统一分配：私聊按会话对 / 群按整群一条流水，主线程号池 ++ 取号）
 // 用途：会话内排序权威 + 拉取游标（WHERE seq > 游标）+ 空洞检测（收包校验 seq == 账本+1）
-// 取号计数器持久化于客户端 QSettings（重启不重号）
+// 仅用于下行方向（PullRequest/Heartbeat 游标表 + PullResponse 消息字段）；上行 Message 已删除 seq 字段
+// 号池重启自愈：启动时 SELECT MAX(seq) GROUP BY 从 DB 重建断点（内存管速度，DB 管记忆）
 constexpr int SEQ_LEN = 10;
 
 // convId 定长：5位十进制补零 = 会话键（私聊 = 发送者 uid / 群聊 = 群号）
 // 用途：消息归属哪段对话（账本/游标按会话独立记账，tab_msg.conv_id 提列建索引）
 constexpr int CONV_LEN = 5;
 
-// Pull 分页大小：单次拉取单会话最大条数（客户端收满自动续拉）
+// Pull 分页大小：单次拉取单会话最大条数（服务端判满页敲门，驱动客户端续拉）
 constexpr int PULL_PAGE_SIZE = 20;
 
 // 包类型枚举（按数据流方向 + 功能域排序：上行 → 下行信令 → 下行数据 → 其他）
 enum class PacketType : quint16 {
     // === 上行通道（客户端 → 服务器）0x01xx ===
     Message         = 0x0100,   // 消息上行（唯一数据上行通道）
-                                // 数据体 = [msgId 13B][seq 10B][群标志1B][发送者5B][接收者（私聊5B/群聊4B）][类型1B][内容...]
-                                // seq 由发送端取号机分配（会话内连续），服务器只入库（INSERT IGNORE 幂等），从不转发消息本体
+                                // 数据体 = [msgId 13B][群标志1B][发送者5B][接收者（私聊5B/群聊4B）][类型1B][内容...]
+                                // seq 由服务端统一分配（单 TCP 流保序 + 主线程串行处理 = 到达顺序即取号顺序），
+                                // 服务器收到后三查（recentAcked/inFlight）→ 号池取号 → 入库（INSERT IGNORE 幂等），从不转发消息本体
     PullRequest     = 0x0101,   // 拉取请求（数据体 = 游标表 = 每会话独立报进度）
                                 // 数据体 = [会话数 2B] + N × [convId 5B][游标 10B]；"00"（count=0）= 无会话要拉
                                 // 空包（<2B）协议违规，服务端直接丢弃；全量拉取能力已移除（微信式：换设备由 SeqInit 同步账本）

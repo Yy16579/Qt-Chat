@@ -61,16 +61,19 @@ signals:
 	void loginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs);
 
 	//私聊消息入库完成：
-	//ok = INSERT 成败；convId = 会话键（私聊=发送者 uid）；seq = 会话内序号（客户端取号机分配，服务端只透传）
+	//ok = INSERT 成败；convId = 会话键（私聊=发送者 uid）；seq = 会话内序号（服务端号池分配）
 	void msgStored(int descriptor, const QString& msgId, bool ok, int recvId, int convId, quint64 seq);
 
 	//群消息批量入库完成：
-	//memberIds = 实际入库的成员列表（已跳过发送者本人）；convId = 群号；seq = 整批共用的会话内序号
+	//memberIds = 实际入库的成员列表（含发送者本人）；convId = 群号；seq = 整批共用的会话内序号（服务端群号池分配）
 	void groupMsgStored(int descriptor, const QString& msgId, bool ok, const QList<int>& memberIds, int convId, quint64 seq);
 
 	//PullTask 拉取结果回执：dataBody = 已封好的完整 JSON 数据体（主线程纯转发不加工）
 	//格式 = {"count":N,"msgs":[{"convId":"..","seq":"..","msgId":"..","payload":"base64"}...]}
 	void pullLoaded(int descriptor, const QByteArray& dataBody);
+
+	//SeqPoolInitTask 号池重建结果：服务端启动时从 DB 恢复双号池断点（防重启从 1 重取号重演撞号）
+	void seqPoolLoaded(const QHash<qint64, quint64>& privPool, const QHash<int, quint64>& groupPool);
 };
 
 
@@ -98,7 +101,7 @@ private:
 
 
 //---------- LoginTask：登录验证任务 ----------
-// 双方式账密验证（employeeID / account 字段）+ 验证成功时打包通讯录快照
+// 双方式账密验证（employeeID / account 字段）+ 验证成功时打包通讯录快照 + 服务端同步账本（重启自愈）
 class LoginTask : public QRunnable
 {
 public:
@@ -119,7 +122,7 @@ private:
 
 //---------- StoreMsgTask：私聊消息入库任务 ----------
 // INSERT IGNORE（ uk_recv_msg ( recv_id, msg_id ) 唯一键冲突时静默跳过，发送端重传不会造成重复入库）
-// content 存的是"消息载荷"（[群标志|发送者|接收者|类型|内容]，不含 msgId/seq 头），Pull 时原样下发
+// content 存的是"消息载荷"（[群标志|发送者|接收者|类型|内容]，不含 msgId 头），Pull 时原样下发
 class StoreMsgTask : public QRunnable {
 public:
 	StoreMsgTask(int descriptor, QString msgId, int recvId, int convId, quint64 seq, QByteArray content, TaskSignals* taskSignals);
@@ -131,15 +134,16 @@ private:
 	QString m_msgId;			//消息幂等键（uk_recv_msg 唯一索引的组成部分，重传挡板）
 	int m_recvId;				//收件人 uid（tab_msg.recv_id）
 	int m_convId;				//会话键（私聊 = 发送者 uid；客户端账本/游标按此会话记账）
-	quint64 m_seq;				//会话内序号（客户端取号机分配，服务端只透传不重分配）
+	quint64 m_seq;				//会话内序号（服务端私聊号池分配——主线程取号后传入，池线程只管写库）
 	QByteArray m_content;		//消息载荷原文
 	TaskSignals* m_signals;		//结果回传器
 };
 
 
 //---------- GroupMembersTask：群消息分发入库任务 ----------
-// 查群成员（公司群 = 全部在职 / 普通群 = 该部门在职）→ 按成员批量 INSERT（一人一行，跳过发送者本人）
-// 会话键 conv_id = m_groupId（群号，复用现有成员不单独存）；seq 整批共用（群是同一序号空间）
+// 查群成员（公司群 = 全部在职 / 普通群 = 该部门在职）→ 按成员批量 INSERT（一人一行，含发送者本人）
+// 含本人：自己视角账本推进全靠这条流水（客户端 m_seenMsgId 去重防重复渲染）
+// 会话键 conv_id = m_groupId（群号，复用现有成员不单独存）；seq 整批共用（服务端群号池分配，群是同一序号空间）
 class GroupMembersTask : public QRunnable {
 public:
 	GroupMembersTask(int descriptor, QString msgId, int sendId, int groupId, quint64 seq, QByteArray content, TaskSignals* taskSignals);
@@ -149,9 +153,9 @@ public:
 private:
 	int m_descriptor;			//来源连接的 fd
 	QString m_msgId;			//消息幂等键（本批各行共用，撞唯一键 = 幂等命中）
-	int m_sendId;				//发送者 uid（入库时跳过本人——自己的消息客户端已本地渲染）
+	int m_sendId;				//发送者 uid（仅日志用；扇出含本人——自己也要一行推进账本）
 	int m_groupId;				//群号（departmentID，兼作会话键 conv_id）
-	quint64 m_seq;				//会话内序号（客户端取号机分配，整批各行共用）
+	quint64 m_seq;				//会话内序号（服务端群号池分配，整批各行共用）
 	QByteArray m_content;		//消息载荷原文（一人一份，内容相同）
 	TaskSignals* m_signals;		//结果回传器
 };
@@ -171,6 +175,20 @@ private:
 	int m_uid;							//发起拉取的用户 uid（= socket->getUid()）
 	QHash<int, quint64> m_cursors;		//接收端账本（会话ID → 消息接收 seq ）
 	TaskSignals* m_signals;				//结果回传器
+};
+
+
+//---------- SeqPoolInitTask：取号池初始化任务 ----------
+// 私聊 / 群聊 取号池初始化（重启自愈）
+// 查 DB 每 (收者,会话) 的 MAX(seq) 恢复双号池断点
+class SeqPoolInitTask : public QRunnable {
+public:
+	explicit SeqPoolInitTask(TaskSignals* taskSignals);
+
+	void run() override;
+
+private:
+	TaskSignals* m_signals;		//结果回传器
 };
 
 //==================================================================================================================================

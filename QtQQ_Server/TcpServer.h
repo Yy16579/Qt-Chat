@@ -6,6 +6,7 @@
 
 #include <QTcpServer>
 #include <QHash>
+#include <QSet>
 #include <QTimer>
 #include <QThreadPool>
 
@@ -35,7 +36,7 @@ private:
 	// 参数说明：fullPacket = 完整原始包（含外层包头）
 	//           dataBody  = 数据体（剥离外层包头后的业务数据）
 	//           descriptor = 来源客户端的 fd 标识
-	void handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 消息上行：解析 msgId/seq/载荷 → 投 StoreMsgTask / GroupMembersTask
+	void handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 消息上行：重传检查 → 号池取号 → 投 StoreMsgTask / GroupMembersTask
 	void handlePullRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);		// 拉取请求：解析账本 → 投 PullTask
 	void handleHeartbeat(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);			// 心跳包：带游标表对账
 	void handleLoginRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor);		// 登录请求：解析账密 → LoginTask 验证
@@ -56,14 +57,15 @@ private slots:
 
 	// 池任务结果槽 =========================================================================================
 	// 公共模式：开头查 m_fdSocketMap 判空——任务在途期间客户端可能已断开，结果作废（竞态防护）
-	void onDbChecked(bool ok, const QString& error);											// DbCheckTask：启动自检结果打印
+	void onDbChecked(bool ok, const QString& error);													// DbCheckTask：启动自检结果打印
 	void onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot,
-						const QHash<int, quint64>& maxSeqs);										// LoginTask：回发响应/同步账本/互踢/绑路由
+						const QHash<int, quint64>& maxSeqs);											// LoginTask：回发响应/互踢/绑路由/同步账本
 	void onMsgStored(int descriptor, const QString& msgId, bool ok, 
-						int recvId, int convId, quint64 seq);									// StoreMsgTask：回 ACK / 更新会话消息最大 seq / 敲门
+						int recvId, int convId, quint64 seq);											// StoreMsgTask：回 ACK / 更新会话消息最大 seq / 敲门
 	void onGroupMsgStored(int descriptor, const QString& msgId, bool ok,
-						const QList<int>& memberIds, int convId, quint64 seq);					// GroupMembersTask：回 ACK / 更新会话消息最大 seq / 敲门
-	void onPullLoaded(int descriptor, const QByteArray& dataBody);								// PullTask：消息下发（JSON 数据体纯转发）
+						const QList<int>& memberIds, int convId, quint64 seq);							// GroupMembersTask：回 ACK / 更新会话消息最大 seq / 敲门
+	void onPullLoaded(int descriptor, const QByteArray& dataBody);										// PullTask：消息下发（JSON 数据体纯转发）
+	void onSeqPoolLoaded(const QHash<qint64, quint64>& privPool, const QHash<int, quint64>& groupPool);	// SeqPoolInitTask：取号池初始化
 	// ======================================================================================================
 
 private:
@@ -75,11 +77,17 @@ private:
 
 	QTimer* m_checkTimer;		//心跳超时扫描定时器
 	
-	QHash<PacketType, void (TcpServer::*)(const QByteArray&, const QByteArray&, int)> m_handlers;		// 业务表
-
 	QThreadPool* m_taskPool;		// 线程池（4 线程常驻：MySQL 慢查询全部外包于此）
 	TaskSignals* m_taskSignals;		// 池任务结果回传器（池线程 emit → 队列投递 → 主线程结果槽）
 
 	QHash<int, QHash<int, quint64>> m_convMaxSeq;	//总帐本：uid → (会话ID → 该会话最新 seq)
+
+	QHash<PacketType, void (TcpServer::*)(const QByteArray&, const QByteArray&, int)> m_handlers;		// 业务表
+	
+	QHash<qint64, quint64> m_privSeqPool;		//私聊号池：键（recvId << 32）| convId 会话对 → 已分配最大 seq
+	QHash<int, quint64> m_groupSeqPool;			//群聊号池：群号 → 已分配最大 seq
+	
+	QSet<QString> m_inFlight;				//在途登记表
+	QSet<QString> m_recentAcked;			//成功入库表
 };
 

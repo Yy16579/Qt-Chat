@@ -63,7 +63,7 @@ void TcpClient::connectToServer() {
 		this->m_tcpClientSocket->abort();
 	}
 
-	//从 config.ini 配置文件读取服务端地址和端口
+	//从 config.ini 配置文件读取服务端 IP 和 PORT
 	QSettings settings(CommonUtils::getConfigPath(), QSettings::IniFormat);
 	QString host = settings.value("Tcp/host").toString();
 	quint16 port = settings.value("Tcp/port").toUInt();
@@ -165,14 +165,13 @@ bool TcpClient::isConnected() const {
 }
 
 bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType, const QString& msg, const QString& file) {
-	// 1. 拼接内层消息包（ msgId + seq + 群标识 + 发送方ID + 接收方ID + 消息类型 + 消息内容）
+	// 1. 拼接内层消息包（ msgId + 群标识 + 发送方ID + 接收方ID + 消息类型 + 消息内容）
 	// 2. 向服务端发送数据包
 	// 3. 加入待确认表（启动超时重传计时器）
 
 	//接收到的参数：
-	//		例1（纯表情）   :		(0, "1images023")	
+	//		例1（纯表情）   :		(0, "1images023")
 	//		例2（纯文本）   :		(1, "你好")
-	//		例3（）
 
 	/*
 	【表情】数据包格式：
@@ -239,16 +238,16 @@ bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 	QString msgId = QString::number(WindowManager::getInstance().m_empID % 1000).rightJustified(3, '0')
 		+ QString::number(QDateTime::currentMSecsSinceEpoch() % 10000000000LL).rightJustified(10, '0');
 
-	// seq 取号：序列号在点击瞬间冻结
-	quint64 seq = ++this->m_sendCounter[recvID];
-	this->saveSeqState(recvID);				//取号后即时写入配置文件（防重启撞号）
-
-	//组装数据体并发出
+	//消息顺序保证：单 TCP 流保序 + 服务端主线程串行处理 = 到达序即发送序（seq 服务端化后客户端无需感知顺序）
 	QString strSend = strGroupFlag + strSendID + strRecvID + strDataType + strData;
-	QByteArray body = msgId.toUtf8()
-		+ QString::number(seq).rightJustified(SEQ_LEN, '0').toUtf8()
-		+ strSend.toUtf8();
+	QByteArray body = msgId.toUtf8() + strSend.toUtf8();
 	this->sendPacket(static_cast<quint16>(PacketType::Message), body);
+
+	//自回声预标记：仅群聊——扇出含本人会回流，自己拉到自己的消息时 seq 是新号
+	//账本挡不住，靠 msgId 认出"是我发的"→ 跳渲染只落账；私聊扇出无自己行永不回流，不登记
+	if (groupFlag == true) {
+		this->m_seenMsgId.insert(msgId);
+	}
 
 	//消息重传机制：
 	//消息注册至待确认表 + 启动重传定时器（无 ACK 则 3/6/12s 有界重传 3 次）
@@ -292,7 +291,7 @@ bool TcpClient::sendMessage(bool groupFlag, int sendID, int recvID, int msgType,
 	pending.timer->start(3 * 1000);			//启动超时重传计时器
 	this->m_pending.insert(msgId, pending);
 
-	qDebug() << QStringLiteral("[Send] msgId=%1 conv=%2 seq=%3 已发出，pending=%4").arg(msgId).arg(recvID).arg(seq).arg(this->m_pending.size());
+	qDebug() << QStringLiteral("[Send] msgId=%1 conv=%2 已发出，pending=%3").arg(msgId).arg(recvID).arg(this->m_pending.size());
 
 	return true;		//成功发出（bool 返回值：false = 未连接/超长，调用方据此决定是否入本地库）
 }
@@ -498,7 +497,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 	else if (packetType == static_cast<quint16>(PacketType::LoginResponse)) {
 		// ===== 2. 登录响应包 =====
 		// 解析内层（结果标志1B + 用户ID 5B）
-		// 格式：成功 "1" + "10001"；失败 "0"
+		// 格式：成功 "1" + "10001 + 通讯录快照"；失败 "0"
 		if (dataBody.size() < 1) {
 			qDebug() << QStringLiteral("[LoginResponse] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
 			return;
@@ -524,7 +523,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 			//成功登录
 			this->m_loggedIn = true;
 
-			//消息发送 seq 表状态载入（必须先于自动 Pull：账本装载后游标才正确，否则发空表拉不到积压）
+			//账本状态载入（必须先于自动 Pull：账本装载后游标才正确，否则发空表拉不到积压）
 			this->loadSeqState(empID);
 
 			//账本补零：按通讯录快照为缺失会话补游标 0（空账本开不出 Pull 清单的死锁解，须在自动 Pull 之前）
@@ -662,33 +661,30 @@ void TcpClient::onLoginResponseInternal(bool result, int empID) {
 }
 
 
-// ===== seq 可靠性（发送取号机 + 接收账本）===============================================================================
+// ===== seq 可靠性（接收账本）===============================================================================
 
 void TcpClient::loadSeqState(int empID) {
-	//登录成功时读取配置文件（seq_<empID>.ini，按账号分文件换号天然隔离）
-	//首次登录无键 → 空表 → 取号从 1 起 / 账本从 0 起（新会话新序号空间）
+	//登录成功时读取账本配置（seq_<empID>.ini，按账号分文件换号天然隔离）
+	//（发送取号已收归服务端号池：[Send] 节与取号机退役，本函数只载入 [Ledger] 账本）
+	//首次登录无键 → 空表 → 账本从 0 起（新会话新序号空间）
 
-	this->m_sendCounter.clear();
 	this->m_ledger.clear();		//★ 先清空再加载（防上一账号残留）
+	this->m_seenMsgId.clear();		//自回声集合同步清（防上个账号残留——尾号不同实际不会误命中，语义上清干净）
+	this->m_reorderBuf.clear();		//乱序缓冲区同步清（防上个账号残留——旧账号的超前消息残留会污染新账号账本：残留 seq 恰接上时被误排空渲染，且推高账本致真消息被判"落后"丢弃）
 
 	//ini 与 config.ini 同放 exe 目录（双击 exe / IDE 启动的工作目录不同，相对路径会散落两处）
 	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini").arg(empID);
 	QSettings settings(path, QSettings::IniFormat);
 	for (const QString& key : settings.allKeys()) {
-		//键格式：Send/<convId> 或 Ledger/<convId>
+		//键格式：Ledger/<convId>（历史残留的 Send/ 键直接忽略——取号机已退役）
 		QStringList parts = key.split('/');
-		if (parts.size() != 2) {
+		if (parts.size() != 2 || parts.at(0) != QStringLiteral("Ledger")) {
 			continue;
 		}
-		if (parts.at(0) == QStringLiteral("Send")) {
-			this->m_sendCounter[parts.at(1).toInt()] = settings.value(key).toULongLong();
-		}
-		else if (parts.at(0) == QStringLiteral("Ledger")) {
-			this->m_ledger[parts.at(1).toInt()] = settings.value(key).toULongLong();
-		}
+		this->m_ledger[parts.at(1).toInt()] = settings.value(key).toULongLong();
 	}
-	qDebug() << QStringLiteral("[Seq] seq 表载入完成：uid=%1，取号机 %2 个会话，账本 %3 个会话")
-			.arg(empID).arg(this->m_sendCounter.size()).arg(this->m_ledger.size());
+	qDebug() << QStringLiteral("[Seq] 账本载入完成：uid=%1，账本 %2 个会话")
+			.arg(empID).arg(this->m_ledger.size());
 }
 
 void TcpClient::seedLedgerFromContacts(int empID) {
@@ -712,17 +708,6 @@ void TcpClient::seedLedgerFromContacts(int empID) {
 		.arg(empID).arg(this->m_ledger.size());
 }
 
-void TcpClient::saveSeqState(int convId) {
-	//发送消息时同步写入配置文件（防崩溃窗口：取了号没写盘就崩溃，重启读回旧号 → 撞号）
-	//（与 loadSeqState 同放 exe 目录，防工作目录漂移导致读写两个文件）
-	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini")
-		.arg(WindowManager::getInstance().m_empID);
-	QSettings settings(path, QSettings::IniFormat);
-	settings.setValue(QStringLiteral("Send/%1").arg(convId),
-		QString::number(this->m_sendCounter.value(convId)));
-	settings.sync();		//立即落盘
-}
-
 void TcpClient::saveLedgerState(int convId) {
 	//消息渲染落账时同步写入（防崩溃窗口：账本内存推进了没写盘就崩溃，重启读回旧游标 → 重复拉取，靠 msgId 去重兜底）
 	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini")
@@ -735,18 +720,24 @@ void TcpClient::saveLedgerState(int convId) {
 
 void TcpClient::handlePulledMsg(int convId, quint64 seq, const QString& msgId, const QByteArray& payload) {
 	//连续性校验三分支：命中渲染落账 / 落后丢弃 / 超前缓冲补洞
-	//（msgId 本阶段不使用，B7 msgId 去重集会用——重复拉取由账本比较兜底）
+	//双防线去重：账本比较挡旧号重放（seq ≤ cur），msgId 判重挡自回声
+
 	quint64 cur = this->m_ledger.value(convId, 0);		//无记录 = 0（value 不插表，账本零污染）
 
 	if (seq == cur + 1) {
-		//① 命中：渲染 + 账本推进
-		this->dispatchMsg(payload);
+		// 命中：msgId 判重 → 渲染 + 账本推进（账本无条件推进，渲染才判重——自回声消息的账本也要走）
+		if (this->m_seenMsgId.contains(msgId) == false) {
+			this->dispatchMsg(payload);
+		}
 		this->m_ledger[convId] = seq;
 
-		//② 回看乱序缓冲区：超前暂存的消息若恰好接上，连发排空（QMap 按 seq 有序，firstKey 即队首）
-		QMap<quint64, QByteArray>& buf = this->m_reorderBuf[convId];
+		// 回看乱序缓冲区：超前暂存的消息若恰好接上，连发排空（QMap 按 seq 有序，firstKey 即队首）
+		QMap<quint64, QPair<QString, QByteArray>>& buf = this->m_reorderBuf[convId];
 		while (buf.isEmpty() == false && buf.firstKey() == this->m_ledger.value(convId) + 1) {
-			this->dispatchMsg(buf.first());
+			const QString& bufMsgId = buf.first().first;		//缓冲区判重：自己的消息因空洞进缓冲，排空同样跳渲染
+			if (this->m_seenMsgId.contains(bufMsgId) == false) {
+				this->dispatchMsg(buf.first().second);
+			}
 			this->m_ledger[convId] = buf.firstKey();
 			buf.erase(buf.begin());
 		}
@@ -757,22 +748,20 @@ void TcpClient::handlePulledMsg(int convId, quint64 seq, const QString& msgId, c
 		this->saveLedgerState(convId);		//循环外一次落盘（含连发推进的最终值）
 	}
 	else if (seq <= cur) {
-		//③ 落后（重复拉取）：丢弃——账本已是更高值，说明这条早收过
-		qDebug() << QStringLiteral("[Pull] conv=%1 seq=%2 落后于账本(%3)，丢弃重复")
-			.arg(convId).arg(seq).arg(cur);
+		// 落后（重复拉取）：丢弃——账本已是更高值，说明这条早收过
+		qDebug() << QStringLiteral("[Pull] conv=%1 seq=%2 落后于账本(%3)，丢弃重复").arg(convId).arg(seq).arg(cur);
 	}
 	else {
-		//④ 超前（发现空洞 seq ∈ (cur+1, seq)）：暂存 + 定点补拉
-		this->m_reorderBuf[convId].insert(seq, payload);
-		qWarning() << QStringLiteral("[Pull] conv=%1 空洞：账本=%2 收到=%3，缓冲并补拉")
-			.arg(convId).arg(cur).arg(seq);
+		// 超前（发现空洞 seq ∈ (cur+1, seq)）：暂存（msgId+载荷）+ 定点补拉
+		this->m_reorderBuf[convId].insert(seq, qMakePair(msgId, payload));
+		qWarning() << QStringLiteral("[Pull] conv=%1 空洞：账本=%2 收到=%3，缓冲并补拉").arg(convId).arg(cur).arg(seq);
 		// TODO(B5)：sendGapPull(convId)——单会话定点补拉（游标=当前账本，500ms×5 次超时跳账）
 	}
 }
 
 void TcpClient::dispatchMsg(const QByteArray& payload) {
-	//载荷切分（与 sendMessage 封包互逆）：[群标志1B][发送者5B][接收者(私5/群4)][类型1B][内容...]
-	//内容 wire 格式原样透传（文本含 5B 长度前缀）——入库/渲染零转换，下游自行解析
+	//载荷切分：[群标志1B][发送者5B][接收者(私5/群4)][类型1B][内容...]
+
 	if (payload.size() < 11) {		//群聊头最小 11B（私聊 12B 更长天然覆盖）
 		qWarning() << QStringLiteral("[Pull] 载荷过短(%1字节)，丢弃").arg(payload.size());
 		return;

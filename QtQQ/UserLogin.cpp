@@ -111,7 +111,6 @@ void UserLogin::onLoginResponse(bool result, int empID) {
 
 void UserLogin::onLoginTimeout() {
 	//服务端5秒内未响应（未启动/网络中断/处理异常），提示用户
-	QMessageBox::warning(this, QStringLiteral("提示"),
-		QStringLiteral("登录超时，请检查服务端是否已启动！"));
+	QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("登录超时，请检查服务端是否已启动！"));
 }
 

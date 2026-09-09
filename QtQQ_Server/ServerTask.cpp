@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QThread>
+#include <QSet>
 #include <QDebug>
 
 
@@ -32,7 +33,7 @@ QSqlDatabase DbConnPool::get() {
 		if (this->m_connNames.contains(tid) == true) {
 			return QSqlDatabase::database(this->m_connNames.value(tid));
 		}
-	}		
+	}
 	//出作用域：析构自动解锁
 
 	// 未命中：创建连接并登记
@@ -82,7 +83,6 @@ TaskSignals::TaskSignals(QObject* parent)
 
 
 //====================================================== 池任务实现 =====================================================
-
 //---------- DbCheckTask ----------
 
 DbCheckTask::DbCheckTask(TaskSignals* taskSignals)
@@ -109,7 +109,7 @@ LoginTask::LoginTask(int descriptor, const QString& account, const QString& pass
 }
 
 void LoginTask::run() {
-	//登录验证：双方式（employeeID / account 字段）+ 成功时打包通讯录快照
+	//登录验证：双方式（employeeID / account 字段）+ 成功时打包通讯录快照 + 服务端同步账本（重启自愈）
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);		//★ 必须显式传 db，QSqlQuery 默认找 default 连接（本项目无默认连接）
@@ -153,7 +153,10 @@ void LoginTask::run() {
 	}
 
 	if (result == "1") {
-		//验证成功 → 同步该用户账本（convId → MAX(seq)，DB 权威值）
+		//验证成功 → 打包通讯录快照（随登录响应一并下发）
+		QByteArray snapshot = this->buildContactSnapshot();
+
+		//验证成功 → 服务端同步该用户账本（convId → MAX(seq)，DB 权威值）（重启自愈）
 		QHash<int, quint64> maxSeqs;
 		query.prepare("SELECT `conv_id`, MAX(`seq`) FROM `tab_msg` WHERE `recv_id` = ? GROUP BY `conv_id`");
 		query.addBindValue(empID.toInt());
@@ -162,8 +165,6 @@ void LoginTask::run() {
 			maxSeqs.insert(query.value(0).toInt(), query.value(1).toULongLong());
 		}
 
-		//验证成功 → 打包通讯录快照（随登录响应一并下发）
-		QByteArray snapshot = this->buildContactSnapshot();
 		qDebug() << QStringLiteral("[LoginTask] fd=%1 登录验证成功，uid=%2 高水位 %3 个会话")
 			.arg(m_descriptor).arg(empID).arg(maxSeqs.size());
 		emit m_signals->loginVerified(m_descriptor, true, empID.toInt(), snapshot, maxSeqs);
@@ -238,7 +239,7 @@ StoreMsgTask::StoreMsgTask(int descriptor, QString msgId, int recvId, int convId
 
 void StoreMsgTask::run() {
 	//私聊消息入库：INSERT IGNORE（ uk_recv_msg ( recv_id, msg_id ) 唯一键冲突时静默跳过，exec 仍返回 true）
-	//seq 由客户端取号机分配，服务端只透传入库（顺序在发送瞬间已冻结，与入库时序无关）
+	//seq 由服务端号池分配（主线程取号后传入；到达顺序即取号顺序，与池线程入库先后无关）
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);		//★ 必须显式传 db（本项目无默认连接）
@@ -274,13 +275,14 @@ GroupMembersTask::GroupMembersTask(int descriptor, QString msgId, int sendId, in
 {}
 
 void GroupMembersTask::run() {
-	//群消息分发入库：查群成员 → 按成员批量 INSERT（一人一行，跳过发送者本人）
-	//会话键 conv_id = 群号（m_groupId），整批共用同一 seq（群是同一序号空间，各成员在同一流水上对账）
+	//群消息分发入库：查群成员 → 按成员批量 INSERT（一人一行，含发送者本人）
+	//含本人：自己视角账本推进全靠这条流水（跳过 = 自己永远有假空洞，补拉也填不上）
+	//会话键 conv_id = 群号（m_groupId），整批共用同一 seq（服务端群号池分配，各成员在同一流水上对账）
 
 	QSqlDatabase db = DbConnPool::getInstance().get();
 	QSqlQuery query(db);
 
-	QList<int> memberIds;		//实际入库的成员列表（跳过发送者后）
+	QList<int> memberIds;		//实际入库的成员列表（含发送者本人）
 
 	// 查询公司群 ID（departmentID）——exec/next 失败直接回失败回执（杜绝"假成功"无声丢消息）
 	query.prepare("SELECT `departmentID` FROM `tab_department` WHERE `department_name` = ?");
@@ -292,7 +294,7 @@ void GroupMembersTask::run() {
 	}
 	int compDepID = query.value(0).toInt();
 
-	// 1. 按群类型查成员列表（公司群 = 全部在职 / 普通群 = 该部门在职）
+	// 1. 查群聊成员列表（公司群 = 全部在职 / 普通群 = 该部门在职）
 	//    exec 失败同样回失败回执（成员列表不可信就不能继续入库）
 	if (m_groupId == compDepID) {
 		query.prepare("SELECT `employeeID` FROM `tab_employees` WHERE `status` = ?");
@@ -312,13 +314,7 @@ void GroupMembersTask::run() {
 
 	//结果集先取出存列表（QSqlQuery 单结果集遍历，防止后续复用被破坏）
 	while (query.next() == true) {
-		int memberId = query.value(0).toInt();
-
-		//跳过发送者本人（自己的消息不入库——客户端已本地渲染）
-		if (memberId == m_sendId) {
-			continue;
-		}
-		memberIds << memberId;
+		memberIds << query.value(0).toInt();		//含发送者本人：自己视角账本推进全靠这条流水（重复渲染由客户端 msgId 去重挡）
 	}
 
 	// 2. 批量入库：循环 INSERT IGNORE（一人一行，recv_id = 各成员 uid，conv_id/seq/msg_id/content 相同）
@@ -401,6 +397,58 @@ void PullTask::run() {
 	root.insert("count", msgs.size());
 	root.insert("msgs", msgs);
 	emit m_signals->pullLoaded(m_descriptor, QJsonDocument(root).toJson(QJsonDocument::Compact));
+}
+
+
+//---------- SeqPoolInitTask ----------
+
+SeqPoolInitTask::SeqPoolInitTask(TaskSignals* taskSignals)
+	: m_signals(taskSignals)
+{}
+
+void SeqPoolInitTask::run() {
+	//号池断点重建：DB 是权威记忆
+	//私聊键 = (recvId<<32)|convId 逐行直填；群键 = 群号（同一群 N 个成员的行各查各的 MAX，池线程内取大折叠成单值）
+	//主线程 onSeqPoolLoaded 再做一层"DB 值 vs 运行期号池"取大合并（防启动早期已取的高值被 DB 旧值覆盖）
+
+	QSqlDatabase db = DbConnPool::getInstance().get();
+	QSqlQuery query(db);		//★ 必须显式传 db（本项目无默认连接）
+
+	QHash<qint64, quint64> privPool;	//私聊取号池
+	QHash<int, quint64> groupPool;		//群聊取号池
+
+	//获取群号集合（conv_id 是否为群会话的判据：群号 = departmentID）
+	QSet<int> groupIds;
+	query.prepare("SELECT `departmentID` FROM `tab_department`");
+	if (query.exec() == true) {
+		while (query.next() == true) {
+			groupIds.insert(query.value(0).toInt());
+		}
+	}
+
+	//逐 (收者, 会话) 最大 seq → 按会话类型分流到双号池
+	query.prepare("SELECT `recv_id`, `conv_id`, MAX(`seq`) FROM `tab_msg` GROUP BY `recv_id`, `conv_id`");
+	if (query.exec() == true) {
+		while (query.next() == true) {
+			int recvId = query.value(0).toInt();
+			int convId = query.value(1).toInt();
+			quint64 maxSeq = query.value(2).toULongLong();
+
+			if (groupIds.contains(convId) == true) {
+				//群会话：跨成员折叠（取更大值防多行回退）
+				if (maxSeq > groupPool.value(convId)) {
+					groupPool[convId] = maxSeq;
+				}
+			}
+			else {
+				//私聊会话：会话对键直填
+				privPool.insert((static_cast<qint64>(recvId) << 32) | static_cast<qint64>(convId), maxSeq);
+			}
+		}
+	}
+
+	qDebug() << QStringLiteral("[SeqInit] 号池重建完成：私聊 %1 会话对，群 %2 个").arg(privPool.size()).arg(groupPool.size());
+	emit m_signals->seqPoolLoaded(privPool, groupPool);
 }
 
 //=======================================================================================================================

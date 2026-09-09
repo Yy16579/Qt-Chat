@@ -7,6 +7,8 @@
 #include <QTimer>
 #include <QHash>
 #include <QMap>
+#include <QSet>
+#include <QPair>
 
 
 //断线意图
@@ -19,7 +21,7 @@ enum class DisconnectIntent {
 
 //待确认消息结构体
 struct PendingMsg {
-	QByteArray packet;		//数据体（[msgId|seq|载荷]，重传时再喂给 sendPacket 重封包头）
+	QByteArray packet;		//数据体（[msgId|载荷]，重传时再喂给 sendPacket 重封包头）
 	QString msgId;			//ACK 匹配键（服务端 MessageAck 数据体）
 	int attempts;			//本轮连通周期内已重传次数（3/6/12s 有界 3 次）
 	QTimer* timer;			//单次触发重传定时器（父对象 TcpClient）
@@ -64,9 +66,8 @@ private:
 
 private:
 	// =================================================================================================================
-	void loadSeqState(int empID);		//seq 表初始化（seq_<empID>.ini：[Send] 取号机 + [Ledger] 账本）
+	void loadSeqState(int empID);		//账本载入（seq_<empID>.ini：[Ledger] 节；发送取号已收归服务端，[Send] 节退役）
 	void seedLedgerFromContacts(int empID);		//账本补零：按通讯录快照为缺失会话建游标 0 条目（空账本拉取死锁解）
-	void saveSeqState(int convId);		//消息发送 seq 表状态同步至配置文件（防窗口崩溃）
 	void saveLedgerState(int convId);	//账本状态同步至配置文件（渲染落账时调用，防窗口崩溃）
 	QByteArray buildCursorTable(int singleConvId = -1);		//创建账本快照 [会话数2B] + N × [convId5B][游标10B]
 	void handlePulledMsg(int convId, quint64 seq, const QString& msgId, const QByteArray& payload);		//拉取消息连续性校验
@@ -128,9 +129,10 @@ private:
 	QTimer* m_reconnectTimer;		//断线重连定时器（单次触发，按退避间隔重排）
 	int m_reconnectAttempts;		//断线重连次数（计算退避间隔）
 
-	QHash<QString, PendingMsg> m_pending;		//待确认消息表：msgId → 重传信息
-	QHash<int, QMap<quint64, QByteArray>> m_reorderBuf;		//乱序缓冲区：会话ID → (seq → 消息载荷)，超前消息暂存
-
-	QMap<int, quint64> m_sendCounter;			//消息发送 seq 表：会话ID → 已发出最大 seq
 	QMap<int, quint64> m_ledger;				//消息接收 seq 表（账本）：会话ID → 已接收最大 seq
+
+	QHash<QString, PendingMsg> m_pending;		//待确认消息表：msgId → 重传信息
+	QHash<int, QMap<quint64, QPair<QString, QByteArray>>> m_reorderBuf;		//乱序缓冲区：会话ID → (seq → (msgId, 载荷))
+	
+	QSet<QString> m_seenMsgId;		//我发出的群消息 msgId 集（发送时预标记，回流认亲）
 };

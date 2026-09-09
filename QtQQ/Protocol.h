@@ -23,24 +23,24 @@ constexpr quint8 PACKET_VERSION = 1;
 //       + MessageAck 回执凭据（发送端 pending 表按 msgId 记账，收 ACK 停重传定时器）
 constexpr int MSGID_LEN = 13;
 
-// seq 定长：10位十进制 = 会话内连续序号（客户端"取号机"分配：每会话独立计数，点击发送瞬间取号）
+// seq 定长：10位十进制 = 会话内连续序号（服务端统一分配：私聊按"会话对"、群聊按群号，主线程号池取号）
 // 用途：会话内排序权威 + 拉取游标（WHERE seq > 游标）+ 空洞检测（收包校验 seq == 账本+1）
-// 取号计数器持久化于客户端 QSettings（重启不重号）
+// 仅出现在下行方向：PullResponse 消息字段 + 游标表（PullRequest/Heartbeat）；上行 Message 已无 seq 字段
 constexpr int SEQ_LEN = 10;
 
 // convId 定长：5位十进制补零 = 会话键（私聊 = 发送者 uid / 群聊 = 群号）
 // 用途：消息归属哪段对话（账本/游标按会话独立记账，tab_msg.conv_id 提列建索引）
 constexpr int CONV_LEN = 5;
 
-// Pull 分页大小：单次拉取单会话最大条数（客户端收满自动续拉）
+// Pull 分页大小：单次拉取单会话最大条数（服务端判满页敲门，驱动客户端续拉）
 constexpr int PULL_PAGE_SIZE = 20;
 
 // 包类型枚举（按数据流方向 + 功能域排序：上行 → 下行信令 → 下行数据 → 其他）
 enum class PacketType : quint16 {
     // === 上行通道（客户端 → 服务器）0x01xx ===
     Message         = 0x0100,   // 消息上行（唯一数据上行通道）
-                                // 数据体 = [msgId 13B][seq 10B][群标志1B][发送者5B][接收者4~5B][类型1B][内容...]
-                                // seq 由发送端取号机分配（会话内连续），服务器只入库（INSERT IGNORE 幂等），从不转发消息本体
+                                // 数据体 = [msgId 13B][群标志1B][发送者5B][接收者4~5B][类型1B][内容...]
+                                // seq 由服务端统一分配（客户端对序号无感知），服务器只入库（INSERT IGNORE 幂等），从不转发消息本体
     PullRequest     = 0x0101,   // 拉取请求（数据体 = 游标表 = 每会话独立报进度）
                                 // 数据体 = [会话数 2B] + N × [convId 5B][游标 10B]
                                 // 触发时机：收到敲门 / 登录成功 / 心跳对账发现落后 / 空洞定点补拉（单会话）
@@ -53,8 +53,9 @@ enum class PacketType : quint16 {
     // === 下行信令通道（服务器 → 客户端）0x02xx（全部 fire-and-forget，丢失无后果） ===
     MessageAck      = 0x0201,   // 投递确认（数据体 = msgId 13B）
                                 // 唯一例外：驱动发送端停止重传（入库成功即回）
-    MsgNotify       = 0x0202,   // 敲门（数据体 = 空或新消息条数）：提醒"你有新消息，来 Pull"
+    MsgNotify       = 0x0202,   // 敲门（数据体 = 空）：提醒"你有新消息，来 Pull"
                                 // 纯信令，丢失无后果（心跳对账、登录自动 Pull 双兜底）
+                                // 新消息入库 / 心跳对账落后 / 满页续拉 三场景共用同一信令
     HeartbeatResponse = 0x0203, // 心跳响应
     LoginResponse   = 0x0204,   // 登录响应
     RegisterResponse= 0x0205,   // 注册响应

@@ -29,9 +29,13 @@ TcpServer::TcpServer(int port)
 	connect(this->m_taskSignals, &TaskSignals::msgStored, this, &TcpServer::onMsgStored);
 	connect(this->m_taskSignals, &TaskSignals::groupMsgStored, this, &TcpServer::onGroupMsgStored);
 	connect(this->m_taskSignals, &TaskSignals::pullLoaded, this, &TcpServer::onPullLoaded);
+	connect(this->m_taskSignals, &TaskSignals::seqPoolLoaded, this, &TcpServer::onSeqPoolLoaded);
 
 	//启动自检：试连 MySQL，结果回主线程打印（fail-fast 提示；失败不终止——服务端降级运行，需重启服务端进程恢复）
 	this->m_taskPool->start(new DbCheckTask(this->m_taskSignals));
+
+	//号池断点重建：从 DB 恢复双号池已分配最大 seq（不重建 → 重启后从 1 取号 → 客户端账本判"落后"静默丢弃）
+	this->m_taskPool->start(new SeqPoolInitTask(this->m_taskSignals));
 
 	//注册业务表
 	this->registerHandlers();
@@ -97,7 +101,8 @@ void TcpServer::registerHandlers() {
 
 void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
 	// 推拉模型：只入库，从不转发消息本体
-	// 数据体布局 = [msgId 13B][seq 10B][群标志1B][发送者5B][接收者（私聊5B/群聊4B）][类型1B][内容...]
+	// 数据体布局 = [msgId 13B][群标志1B][发送者5B][接收者（私聊5B/群聊4B）][类型1B][内容...]
+	// seq 由服务端统一分配（单 TCP 流保序 + 主线程串行处理 = 到达顺序即取号顺序）
 
 	// 登录校验：未登录的连接不允许发消息
 	TcpSocket* srcSocket = this->m_fdSocketMap.value(descriptor);
@@ -106,36 +111,55 @@ void TcpServer::handleMessage(const QByteArray& fullPacket, const QByteArray& da
 		return;
 	}
 
-	// 长度校验：最小合法长度 = msgId 13B + seq 10B + 载荷头 11B（群标志1 + 发送者5 + 接收者4 + 类型1，按群聊头计算；
-	// 私聊头 12B 更长，天然覆盖）
-	if (dataBody.size() < MSGID_LEN + SEQ_LEN + 11) {
+	// 长度校验：最小合法长度 = msgId 13B + 载荷头 11B（群标志1 + 发送者5 + 接收者4 + 类型1，按群聊头计算）
+	if (dataBody.size() < MSGID_LEN + 11) {
 		qDebug() << QStringLiteral("[Message] fd=%1 数据体过短(%2字节)，丢弃").arg(descriptor).arg(dataBody.size());
 		return;
 	}
 
-	// 切分：msgId / seq / 载荷
-	// seq = 客户端取号机分配的会话内序号（服务端只透传，顺序在发送瞬间已冻结，与入库时序无关）
-	// 载荷 = [群标志1B|发送者5B|接收者（私聊5B/群聊4B）|类型1B|内容...]（不含 msgId/seq 头，入库存的就是它，Pull 时原样下发）
+	// 1. 切分：msgId / 载荷
+	// msgId = 消息全局唯一身份证（客户端生成，重传幂等键）
+	// 载荷 = [群标志1B|发送者5B|接收者（私聊5B/群聊4B）|类型1B|内容...]
 	QString msgId = QString::fromUtf8(dataBody.left(MSGID_LEN));
-	quint64 seq = dataBody.mid(MSGID_LEN, SEQ_LEN).toULongLong();		//10B 补零十进制
-	QByteArray payload = dataBody.mid(MSGID_LEN + SEQ_LEN);
+	QByteArray payload = dataBody.mid(MSGID_LEN);
 
-	// 解析载荷定位字段（固定偏移切分，与客户端 sendMessage 拼包格式一一对应）
+	// 2. 消息去重（根据 msgId ）
+	if (this->m_recentAcked.contains(msgId) == true) {
+		//消息已入库，直接回发 ACK 响应
+		this->sendPacket(static_cast<quint16>(PacketType::MessageAck), msgId.toUtf8(), srcSocket);
+		qDebug() << QStringLiteral("[Message] fd=%1 msgId=%2 重传直达 ACK（已入库）").arg(descriptor).arg(msgId);
+		return;
+	}
+	if (this->m_inFlight.contains(msgId) == true) {
+		//消息正在处理
+		qDebug() << QStringLiteral("[Message] fd=%1 msgId=%2 在途重复包，吞掉等回执").arg(descriptor).arg(msgId);
+		return;
+	}
+
+	// 3. 取号入库，加入在途登记表
 	int groupFlag = payload[0] - '0';			//群标志：0 私聊 / 1 群聊
-	int sendId = payload.mid(1, 5).toInt();		//发送者 uid（5B 十进制）
+	int sendId = payload.mid(1, 5).toInt();		//发送方 uid
 	if (groupFlag == 0) {
-		//私聊：接收者 uid（5B）
+		//私聊
 		int recvId = payload.mid(6, 5).toInt();
-		int convId = sendId;		//会话键：私聊 = 发送者 uid（收件人账本按此会话记账）
+		int convId = sendId;		//会话键：私聊 = 发送方 uid
+
+		//私聊号池取号，加入在途登记表
+		quint64 seq = ++this->m_privSeqPool[(static_cast<qint64>(recvId) << 32) | static_cast<qint64>(convId)];
+		this->m_inFlight.insert(msgId);
 
 		//消息入库
 		this->m_taskPool->start(new StoreMsgTask(descriptor, msgId, recvId, convId, seq, payload, this->m_taskSignals));
 	}
 	else {
-		//群聊：群号（4B，即 departmentID）
+		//群聊
 		int groupId = payload.mid(6, 4).toInt();
 
-		//群消息按成员展开入库（会话键 = 群号，GroupMembersTask 内复用 m_groupId）
+		//群号池取号，加入在途登记表
+		quint64 seq = ++this->m_groupSeqPool[groupId];
+		this->m_inFlight.insert(msgId);
+
+		//群消息按成员展开入库（会话键 = 群号，GroupMembersTask 内复用 m_groupId；扇出含发送者本人）
 		this->m_taskPool->start(new GroupMembersTask(descriptor, msgId, sendId, groupId, seq, payload, this->m_taskSignals));
 	}
 }
@@ -224,7 +248,7 @@ void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& 
 void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArray& dataBody, int descriptor) {
 	// 解析内层消息体（账号 + "|" + 密码）
 
-	// 1. 解包，校验格式，提取包中的账号密码
+	// 解包，校验格式，提取包中的账号密码
 	QList<QByteArray> fields = dataBody.split('|');
 	if (fields.size() < 2 || fields.at(0).isEmpty() || fields.at(1).isEmpty()) {
 		qDebug() << QStringLiteral("[LoginRequest] fd=%1 数据体格式错误，回发失败").arg(descriptor);
@@ -234,8 +258,8 @@ void TcpServer::handleLoginRequest(const QByteArray& fullPacket, const QByteArra
 	QString account = QString::fromUtf8(fields.at(0));		//账号
 	QString password = QString::fromUtf8(fields.at(1));		//密码
 
-	// 2. 验证 + 快照打包外包给池（最重的 DB 业务：最多 5 条 SQL + JSON 序列化）
-	//结果（成败/uid/快照字节）经 TaskSignals 回 onLoginVerified，由主线程拼响应/互踢/绑路由
+	// 验证 + 通讯录快照打包 + 同步总账本
+	// 结果（成败/uid/快照字节/账本）经 TaskSignals 回 onLoginVerified，由主线程拼响应/互踢/绑路由
 	this->m_taskPool->start(new LoginTask(descriptor, account, password, this->m_taskSignals));
 }
 
@@ -410,7 +434,7 @@ void TcpServer::onDbChecked(bool ok, const QString& error) {
 }
 
 void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs) {
-	//LoginTask 结果处理：回发响应包 / 重建会话高水位 / 踢下线 / 绑路由
+	//LoginTask 结果处理：回发响应包 / 踢下线 / 绑路由 / 服务端同步账本
 
 	// 竞态防护：验证在途期间（MySQL 慢）客户端可能已断开，结果作废
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
@@ -429,15 +453,6 @@ void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArr
 		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, socket);
 	}
 
-	// 重建会话高水位：DB 权威值合并进内存表（if seq > max 单调推进，不覆盖运行期更高值）
-	//（服务端重启丢内存后靠每个用户登录增量自愈——合并需在登录自动 Pull 到达前完成，
-	//  本槽与 PullRequest 处理同在主线程事件队列，响应先发 Pull 后到，时序天然满足）
-	for (auto it = maxSeqs.begin(); it != maxSeqs.end(); ++it) {
-		if (it.value() > this->m_convMaxSeq[uid][it.key()]) {
-			this->m_convMaxSeq[uid][it.key()] = it.value();
-		}
-	}
-
 	// 绑定路由表
 	// 重复登录踢下线
 	TcpSocket* oldSocket = this->m_uidSocketMap.value(uid);
@@ -449,10 +464,26 @@ void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArr
 	}
 	socket->setUid(uid);
 	this->m_uidSocketMap.insert(uid, socket);
+
+	// 服务端同步账本
+	for (auto it = maxSeqs.begin(); it != maxSeqs.end(); ++it) {
+		if (it.value() > this->m_convMaxSeq[uid][it.key()]) {
+			this->m_convMaxSeq[uid][it.key()] = it.value();
+		}
+	}
 }
 
 void TcpServer::onMsgStored(int descriptor, const QString& msgId, bool ok, int recvId, int convId, quint64 seq) {
 	//StoreMsgTask 结果处理：回发投递确认 ACK / 更新会话消息最大 seq / 敲门
+
+	//移除在途登记表
+	this->m_inFlight.remove(msgId);
+	if (ok == true) {
+		this->m_recentAcked.insert(msgId);
+		if (this->m_recentAcked.size() > 4096) {
+			this->m_recentAcked.clear();		//容量保护（清空后重传走 INSERT IGNORE 幂等路径兜底，安全）
+		}
+	}
 
 	// 入库失败：不回 ACK（等待发送端超时重传），也不敲门（库里没货）
 	if (ok == false) {
@@ -481,6 +512,17 @@ void TcpServer::onMsgStored(int descriptor, const QString& msgId, bool ok, int r
 
 void TcpServer::onGroupMsgStored(int descriptor, const QString& msgId, bool ok, const QList<int>& memberIds, int convId, quint64 seq) {
 	//GroupMembersTask 结果处理：回发投递确认 ACK / 更新会话消息最大 seq / 群成员挨个敲门
+
+	//移除在途登记表
+	this->m_inFlight.remove(msgId);
+	if (ok == true) {
+		this->m_recentAcked.insert(msgId);
+		if (this->m_recentAcked.size() > 4096) {
+			//容量保护（清空后重传走 INSERT IGNORE 幂等路径兜底，安全——代价：号池已重新取号烧一个新 seq，
+			//接收端账本留空洞，靠 B5 定点补拉/跳洞机制兜底）
+			this->m_recentAcked.clear();
+		}
+	}
 
 	// 批量入库失败：不回 ACK（等待发送端超时重传），不敲门
 	if (ok == false) {
@@ -538,5 +580,23 @@ void TcpServer::onPullLoaded(int descriptor, const QByteArray& dataBody) {
 				.arg(doc.object().value("count").toInt());
 		}
 	}
+}
+
+void TcpServer::onSeqPoolLoaded(const QHash<qint64, quint64>& privPool, const QHash<int, quint64>& groupPool) {
+	//取号池初始化：DB 权威值合并进内存双号池（单调推进取大，不覆盖运行期已发的高值）
+	//（重建任务在池线程跑，启动早期若有消息先到达已取号，取大合并防回退——与 m_convMaxSeq 登录重建同模式）
+	for (auto it = privPool.begin(); it != privPool.end(); ++it) {
+		if (it.value() > this->m_privSeqPool.value(it.key())) {
+			this->m_privSeqPool[it.key()] = it.value();
+		}
+	}
+	for (auto it = groupPool.begin(); it != groupPool.end(); ++it) {
+		if (it.value() > this->m_groupSeqPool.value(it.key())) {
+			this->m_groupSeqPool[it.key()] = it.value();
+		}
+	}
+
+	qDebug() << QStringLiteral("[SeqInit] 号池合并完成：私聊 %1 会话对，群 %2 个（已可正常取号）")
+		.arg(this->m_privSeqPool.size()).arg(this->m_groupSeqPool.size());
 }
 
