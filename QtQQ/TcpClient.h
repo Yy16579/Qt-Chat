@@ -66,11 +66,10 @@ private:
 
 private:
 	// =================================================================================================================
-	void loadSeqState(int empID);		//账本载入（seq_<empID>.ini：[Ledger] 节；发送取号已收归服务端，[Send] 节退役）
-	void seedLedgerFromContacts(int empID);		//账本补零：按通讯录快照为缺失会话建游标 0 条目（空账本拉取死锁解）
-	void saveLedgerState(int convId);	//账本状态同步至配置文件（渲染落账时调用，防窗口崩溃）
+	void mirrorServerLedger(int empID, const QHash<int, quint64>& serverLedger);		//账本初始化：清残留 + 镜像服务端进度 + 按通讯录补零（登录时一次完成，DB 是唯一进度源）
 	QByteArray buildCursorTable(int singleConvId = -1);		//创建账本快照 [会话数2B] + N × [convId5B][游标10B]
 	void handlePulledMsg(int convId, quint64 seq, const QString& msgId, const QByteArray& payload);		//拉取消息连续性校验
+	void flushReorderBuf(int convId);	//排空乱序缓冲区：连发接上账本的超前消息（命中/跳洞共用出口，排空即任务完成）
 	void dispatchMsg(const QByteArray& payload);		//载荷切分 + 发射接收信号（拉取/缓冲排空共用出口）
 	void flushPending();				//断线重连重登成功后，未确认消息全表重发（attempts 归零）
 	void clearPending();				//会话终结（Logout/KickOut）清空全表
@@ -109,6 +108,7 @@ private slots:
 	void onReadyRead();			//响应 readyRead 信号，负责 接收数据包 粘包切包 处理
 
 	void onLoginResponseInternal(bool result, int empID);		//内部槽：接管自动重登的响应
+	void onGapPullTimeout();		//扫描槽：逐任务补拉，次数耗尽跳洞
 
 private:
 	//成员变量
@@ -132,7 +132,10 @@ private:
 	QMap<int, quint64> m_ledger;				//消息接收 seq 表（账本）：会话ID → 已接收最大 seq
 
 	QHash<QString, PendingMsg> m_pending;		//待确认消息表：msgId → 重传信息
-	QHash<int, QMap<quint64, QPair<QString, QByteArray>>> m_reorderBuf;		//乱序缓冲区：会话ID → (seq → (msgId, 载荷))
+	QHash<int, QMap<quint64, QPair<QString, QByteArray>>> m_reorderBuf;		//乱序缓冲区：会话ID → (seq → (msgId, 载荷))，超前消息暂存
 	
-	QSet<QString> m_seenMsgId;		//我发出的群消息 msgId 集（发送时预标记，回流认亲）
+	QSet<QString> m_seenMsgId;			//我发出的群消息 msgId 集（发送时预标记，回流认亲）
+	QTimer* m_gapPullTimer;				//定点补拉全局扫描定时器（500ms 周期，任务表空自动停） 
+	QHash<int, int> m_gapPullTasks;		//补拉任务表：convId → 剩余补拉次数（耗尽跳洞）
 };
+

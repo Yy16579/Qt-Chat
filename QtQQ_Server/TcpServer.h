@@ -59,7 +59,7 @@ private slots:
 	// 公共模式：开头查 m_fdSocketMap 判空——任务在途期间客户端可能已断开，结果作废（竞态防护）
 	void onDbChecked(bool ok, const QString& error);													// DbCheckTask：启动自检结果打印
 	void onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot,
-						const QHash<int, quint64>& maxSeqs);											// LoginTask：回发响应/互踢/绑路由/同步账本
+						const QHash<int, quint64>& maxSeqs, const QHash<int, quint64>& ledger);			// LoginTask：回发响应/互踢/绑路由/同步账本
 	void onMsgStored(int descriptor, const QString& msgId, bool ok, 
 						int recvId, int convId, quint64 seq);											// StoreMsgTask：回 ACK / 更新会话消息最大 seq / 敲门
 	void onGroupMsgStored(int descriptor, const QString& msgId, bool ok,

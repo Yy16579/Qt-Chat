@@ -194,6 +194,9 @@ void TcpServer::handlePullRequest(const QByteArray& fullPacket, const QByteArray
 			dataBody.mid(offset + CONV_LEN, SEQ_LEN).toULongLong());
 	}
 
+	//用户账本进度持久化
+	this->m_taskPool->start(new LedgerUpsertTask(uid, cursors));
+
 	// 投池：逐会话查库（seq > 游标 的积压消息）→ 结果经 pullLoaded 信号回 onPullLoaded
 	this->m_taskPool->start(new PullTask(descriptor, uid, cursors, this->m_taskSignals));
 
@@ -231,9 +234,13 @@ void TcpServer::handleHeartbeat(const QByteArray& fullPacket, const QByteArray& 
 			dataBody.mid(offset + CONV_LEN, SEQ_LEN).toULongLong());
 	}
 
+	int uid = socket->getUid();
+
+	//用户账本进度持久化
+	this->m_taskPool->start(new LedgerUpsertTask(uid, cursors));
+
 	// 单循环对账（纯内存零 DB 查询——DB 再卡心跳不受影响）
 	// .value(key, 0) 视为游标 0 —— 统一谓词：服务端最新 seq > 客户端游标 → 落后 → 敲门（丢了有下次心跳兜底）
-	int uid = socket->getUid();
 	const QHash<int, quint64> serverSeqs = this->m_convMaxSeq.value(uid);		//值拷贝（避免误建空表项）
 	for (auto it = serverSeqs.begin(); it != serverSeqs.end(); ++it) {
 		if (it.value() > cursors.value(it.key(), 0)) {
@@ -433,8 +440,8 @@ void TcpServer::onDbChecked(bool ok, const QString& error) {
 	}
 }
 
-void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs) {
-	//LoginTask 结果处理：回发响应包 / 踢下线 / 绑路由 / 服务端同步账本
+void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs, const QHash<int, quint64>& ledger) {
+	//LoginTask 结果处理：回发响应包（1 + uid + 通讯录快照 + 账本镜像）/ 踢下线 / 绑路由 / 服务端同步账本
 
 	// 竞态防护：验证在途期间（MySQL 慢）客户端可能已断开，结果作废
 	TcpSocket* socket = this->m_fdSocketMap.value(descriptor);
@@ -449,7 +456,15 @@ void TcpServer::onLoginVerified(int descriptor, bool ok, int uid, const QByteArr
 		return;
 	}
 	else {
-		QByteArray body = "1" + QString::number(uid).rightJustified(5, '0').toUtf8() + snapshot;
+		//响应体：结果1B + uid5B + 账本镜像表(count2B + N×[convId5B+游标10B]) + 通讯录JSON
+		QByteArray ledgerTable;
+		for (auto it = ledger.begin(); it != ledger.end(); ++it) {
+			ledgerTable += (QString::number(it.key()).rightJustified(CONV_LEN, '0')
+				+ QString::number(it.value()).rightJustified(SEQ_LEN, '0')).toUtf8();
+		}
+		QByteArray body = "1" + QString::number(uid).rightJustified(5, '0').toUtf8()
+			+ QString::number(ledger.size()).rightJustified(2, '0').toUtf8()
+			+ ledgerTable + snapshot;
 		this->sendPacket(static_cast<quint16>(PacketType::LoginResponse), body, socket);
 	}
 

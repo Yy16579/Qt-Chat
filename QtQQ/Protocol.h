@@ -43,9 +43,10 @@ enum class PacketType : quint16 {
                                 // seq 由服务端统一分配（客户端对序号无感知），服务器只入库（INSERT IGNORE 幂等），从不转发消息本体
     PullRequest     = 0x0101,   // 拉取请求（数据体 = 游标表 = 每会话独立报进度）
                                 // 数据体 = [会话数 2B] + N × [convId 5B][游标 10B]
-                                // 触发时机：收到敲门 / 登录成功 / 心跳对账发现落后 / 空洞定点补拉（单会话）
+                                // 触发时机：收到敲门 / 登录成功 / 空洞定点补拉（单会话；心跳对账发现落后即走敲门链路，不重复列）
     Heartbeat       = 0x0102,   // 心跳包（数据体 = 游标表，与 PullRequest 同构）
                                 // 对账：任一会话 服务端最新 seq > 游标 → 回敲门（消息本体绝不搭心跳顺风车）
+                                // 进度上报：游标 upsert 至 DB tab_ledger（渲染落账后批次级主动补发，不等 10s 周期）
     LoginRequest    = 0x0103,   // 登录请求（数据体 = 账号|密码）
     RegisterRequest = 0x0104,   // 注册请求
     Logout          = 0x0105,   // 注销
@@ -58,6 +59,9 @@ enum class PacketType : quint16 {
                                 // 新消息入库 / 心跳对账落后 / 满页续拉 三场景共用同一信令
     HeartbeatResponse = 0x0203, // 心跳响应
     LoginResponse   = 0x0204,   // 登录响应
+                                // 成功 = "1" + uid(5B) + 账本镜像表(count2B + N×[convId5B+游标10B]) + 通讯录JSON
+                                //（账本镜像 = tab_ledger 持久化的接收进度：客户端镜像后拉"上次进度之后"的消息，
+                                //  离线未读可见、历史不重拉——换设备/同设备统一此语义；失败 = "0"）
     RegisterResponse= 0x0205,   // 注册响应
     KickOut         = 0x0206,   // 踢下线通知
 

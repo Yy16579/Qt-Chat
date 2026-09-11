@@ -165,13 +165,23 @@ void LoginTask::run() {
 			maxSeqs.insert(query.value(0).toInt(), query.value(1).toULongLong());
 		}
 
-		qDebug() << QStringLiteral("[LoginTask] fd=%1 登录验证成功，uid=%2 高水位 %3 个会话")
-			.arg(m_descriptor).arg(empID).arg(maxSeqs.size());
-		emit m_signals->loginVerified(m_descriptor, true, empID.toInt(), snapshot, maxSeqs);
+		//验证成功 → 读取该用户账本镜像（tab_ledger 持久化的接收进度，随登录响应下发）
+		//（换设备登录时客户端镜像此表：离线未读可拉取、历史不重拉——微信式）
+		QHash<int, quint64> ledger;
+		query.prepare("SELECT `conv_id`, `cursor` FROM `tab_ledger` WHERE `uid` = ?");
+		query.addBindValue(empID.toInt());
+		query.exec();
+		while (query.next() == true) {
+			ledger.insert(query.value(0).toInt(), query.value(1).toULongLong());
+		}
+
+		qDebug() << QStringLiteral("[LoginTask] fd=%1 登录验证成功，uid=%2 高水位 %3 会话，账本镜像 %4 会话")
+			.arg(m_descriptor).arg(empID).arg(maxSeqs.size()).arg(ledger.size());
+		emit m_signals->loginVerified(m_descriptor, true, empID.toInt(), snapshot, maxSeqs, ledger);
 	}
 	else {
 		qDebug() << QStringLiteral("[LoginTask] fd=%1 账号密码验证失败").arg(m_descriptor);
-		emit m_signals->loginVerified(m_descriptor, false, -1, QByteArray(), QHash<int, quint64>());
+		emit m_signals->loginVerified(m_descriptor, false, -1, QByteArray(), QHash<int, quint64>(), QHash<int, quint64>());
 	}
 }
 
@@ -449,6 +459,31 @@ void SeqPoolInitTask::run() {
 
 	qDebug() << QStringLiteral("[SeqInit] 号池重建完成：私聊 %1 会话对，群 %2 个").arg(privPool.size()).arg(groupPool.size());
 	emit m_signals->seqPoolLoaded(privPool, groupPool);
+}
+
+
+//---------- LedgerUpsertTask ----------
+
+LedgerUpsertTask::LedgerUpsertTask(int uid, const QHash<int, quint64>& ledger)
+	: m_uid(uid)
+	, m_ledger(ledger)
+{}
+
+void LedgerUpsertTask::run() {
+	//账本进度持久化：逐会话 upsert（换设备登录时随登录响应下发）
+	//GREATEST 取大防回退：被踢设备的迟到心跳带旧游标，不拉低新设备已推进的进度
+
+	QSqlDatabase db = DbConnPool::getInstance().get();
+	QSqlQuery query(db);		//★ 必须显式传 db（本项目无默认连接）
+
+	query.prepare("INSERT INTO `tab_ledger` (`uid`, `conv_id`, `cursor`) VALUES (?, ?, ?) "
+		"ON DUPLICATE KEY UPDATE `cursor` = GREATEST(`cursor`, VALUES(`cursor`))");
+	for (auto it = m_ledger.begin(); it != m_ledger.end(); ++it) {
+		query.addBindValue(m_uid);
+		query.addBindValue(it.key());
+		query.addBindValue(static_cast<qulonglong>(it.value()));
+		query.exec();
+	}
 }
 
 //=======================================================================================================================

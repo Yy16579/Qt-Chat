@@ -26,10 +26,15 @@ TcpClient::TcpClient()
 	this->m_heartbeatTimer->setInterval(10 * 1000);
 	connect(this->m_heartbeatTimer, &QTimer::timeout, this, &TcpClient::sendHeartbeat);
 
-	//创建重连定时器（单次触发：到期发起重连，结果决定是否重排下一轮）
+	//创建断线重连定时器（单次触发：到期发起重连，结果决定是否重排下一轮）
 	this->m_reconnectTimer = new QTimer(this);
 	this->m_reconnectTimer->setSingleShot(true);
 	connect(this->m_reconnectTimer, &QTimer::timeout, this, &TcpClient::connectToServer);
+
+	//创建定点补拉定时器
+	this->m_gapPullTimer = new QTimer(this);
+	this->m_gapPullTimer->setInterval(500);
+	connect(this->m_gapPullTimer, &QTimer::timeout, this, &TcpClient::onGapPullTimeout);
 
 	//监听自己的登录响应：自动重登的回音由内部槽接管
 	connect(this, &TcpClient::signalLoginResponse, this, &TcpClient::onLoginResponseInternal);
@@ -126,8 +131,11 @@ void TcpClient::connectToServer() {
 		connect(this->m_tcpClientSocket, &QTcpSocket::disconnected,
 			this, [this]() {
 
-				this->m_heartbeatTimer->stop();	//停止心跳定时器
 				this->m_buffer.clear();			//清空缓冲区
+				this->m_heartbeatTimer->stop();	//停止心跳定时器
+				this->m_reorderBuf.clear();		//清空乱序缓冲区（连接级状态随 TCP 会话死亡作废，主动/意外断线一律清）
+				this->m_gapPullTasks.clear();	//清空补拉任务表
+				this->m_gapPullTimer->stop();	//停止定点补拉定时器
 				
 				//断线原因判断（所有断线路径最终都汇到 disconnected，统一在此分流）
 				if (this->m_intent == DisconnectIntent::Logout || this->m_intent == DisconnectIntent::KickOut) {
@@ -140,6 +148,7 @@ void TcpClient::connectToServer() {
 					this->m_reconnectAttempts = 0;
 
 					this->clearPending();				//会话终结：pending 表责任解除（未确认消息不再追投）+ 防泄漏
+					this->m_seenMsgId.clear();			//自回声集合同步清（与 pending 同语义：会话终结才退休——意外断线保留，自动重登后回声仍需认亲防双渲染）
 					this->m_reconnectTimer->stop();		//封存可能挂起的重连定时器
 				}
 				else {
@@ -469,8 +478,8 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 	if (packetType == static_cast<quint16>(PacketType::PullResponse)) {
 		// ===== 1. 拉取响应包（消息本体唯一入口）=====
 		// 数据体 = JSON {"count":N,"msgs":[{"convId":"..","seq":"..","msgId":"..","payload":"base64"}...]}
-		// 逐条解析后交连续性校验：JSON 字段边界天然清晰，无需定长切分
-
+		// 逐条解析 JSON 数据
+ 
 		QJsonParseError parseErr;
 		QJsonDocument doc = QJsonDocument::fromJson(dataBody, &parseErr);
 		if (parseErr.error != QJsonParseError::NoError || doc.isObject() == false) {
@@ -479,6 +488,10 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 		}
 
 		const QJsonArray msgs = doc.object().value("msgs").toArray();
+
+		//批次级进度上报的前快照（只在账本真实推进时上报：全超前/全重复批次不报）
+		const QMap<int, quint64> before = this->m_ledger;
+
 		for (const QJsonValue& v : msgs) {
 			QJsonObject msg = v.toObject();
 			//convId/seq/msgId 均为字符串承载（服务端封包约定：quint64 防 JSON 数值精度损失）
@@ -493,11 +506,16 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 			//逐条进入连续性校验（渲染落账 / 丢弃重复 / 空洞缓冲）
 			this->handlePulledMsg(convId, seq, msgId, payload);
 		}
+
+		//批次级进度上报：本批渲染落账推进了账本 → 主动心跳同步 DB（换设备登录靠它拉到离线未读）
+		//（变化判断防空洞批次风暴：全超前进缓冲账本不动 → 无条件上报会引发"敲门→拉取→再报"循环直到 B5 跳洞才停）
+		if (this->m_ledger != before) {
+			this->sendHeartbeat();
+		}
 	}
 	else if (packetType == static_cast<quint16>(PacketType::LoginResponse)) {
 		// ===== 2. 登录响应包 =====
-		// 解析内层（结果标志1B + 用户ID 5B）
-		// 格式：成功 "1" + "10001 + 通讯录快照"；失败 "0"
+		// 格式：成功 "1" + uid(5B) + 账本镜像表(count2B + N×[convId5B+游标10B]) + 通讯录JSON；失败 "0"
 		if (dataBody.size() < 1) {
 			qDebug() << QStringLiteral("[LoginResponse] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
 			return;
@@ -507,30 +525,41 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 		int empID = 0;							//用户 employeeID（成功时有效）
 
 		if (result == true) {
-			//成功：数据体至少要有 结果标志1 + uid 5 = 6字节
-			if (dataBody.size() < 6) {
-				qDebug() << QStringLiteral("[LoginResponse] 成功响应缺少uid字段，丢弃");
+			//成功：数据体至少要有 结果标志1 + uid5 + count2 = 8字节
+			if (dataBody.size() < 8) {
+				qDebug() << QStringLiteral("[LoginResponse] 成功响应缺少uid/账本镜像表头，丢弃");
 				return;
 			}
 			empID = dataBody.mid(1, 5).toInt();
 
-			//提取通讯录快照：6字节定长头（结果1B+uid5B）之后的附加数据
-			//必须先填缓存再 emit——emit 后 UserLogin 会立即 new CCMainWindow 查询缓存
-			if (dataBody.size() > 6) {
-				ContactBook::getInstance().loadFromJson(dataBody.mid(6));
+			//提取账本：服务端持久化的接收进度（换设备/同设备统一从此镜像）
+			const int entryLen = CONV_LEN + SEQ_LEN;		//单条目长度（15B）
+			int count = dataBody.mid(6, 2).toInt();			//会话数（2B 十进制补零）
+			int jsonStart = 8 + count * entryLen;			//通讯录 JSON 起始偏移
+			if (dataBody.size() < jsonStart) {
+				qDebug() << QStringLiteral("[LoginResponse] 账本镜像表长度不匹配(count=%1)，丢弃").arg(count);
+				return;
 			}
-			
+			QHash<int, quint64> serverLedger;
+			for (int i = 0; i < count; ++i) {
+				int offset = 8 + i * entryLen;
+				serverLedger.insert(dataBody.mid(offset, CONV_LEN).toInt(),
+					dataBody.mid(offset + CONV_LEN, SEQ_LEN).toULongLong());
+			}
+
+			//提取通讯录快照：账本镜像表之后的附加数据
+			//必须先填缓存再 emit——emit 后 UserLogin 会立即 new CCMainWindow 查询缓存
+			if (dataBody.size() > jsonStart) {
+				ContactBook::getInstance().loadFromJson(dataBody.mid(jsonStart));
+			}
+
 			//成功登录
 			this->m_loggedIn = true;
 
-			//账本状态载入（必须先于自动 Pull：账本装载后游标才正确，否则发空表拉不到积压）
-			this->loadSeqState(empID);
+			//账本初始化：清残留 + 镜像服务端进度 + 补零（必须先于自动 Pull：游标才正确）
+			this->mirrorServerLedger(empID, serverLedger);
 
-			//账本补零：按通讯录快照为缺失会话补游标 0（空账本开不出 Pull 清单的死锁解，须在自动 Pull 之前）
-			this->seedLedgerFromContacts(empID);
-
-			//登录成功自动 Pull：拉取离线期间积压（不等 30s 心跳对账敲门）
-			//（也是服务端重启后 m_convMaxSeq 高水位丢失场景的兜底：按账本直查库，不依赖内存对账）
+			//登录成功自动 Pull：拉取镜像进度之后的积压（离线未读，不等 30s 心跳对账敲门）
 			this->sendPullRequest(-1);
 		}
 
@@ -660,103 +689,137 @@ void TcpClient::onLoginResponseInternal(bool result, int empID) {
 	}
 }
 
+void TcpClient::onGapPullTimeout() {
+	//扫描任务表，进行定点补拉
+	//次数耗尽：跳洞，推进账本。	次数未耗尽：定点发送拉取请求
+	//时间线：5 次补拉（2.5s）+ 第 6 拍跳洞（3s），会话最多卡 3 秒自愈
 
-// ===== seq 可靠性（接收账本）===============================================================================
+	//任务表空 → 停表返回（不空转）
+	if (this->m_gapPullTasks.isEmpty() == true) {
+		this->m_gapPullTimer->stop();
+		return;
+	}
 
-void TcpClient::loadSeqState(int empID) {
-	//登录成功时读取账本配置（seq_<empID>.ini，按账号分文件换号天然隔离）
-	//（发送取号已收归服务端号池：[Send] 节与取号机退役，本函数只载入 [Ledger] 账本）
-	//首次登录无键 → 空表 → 账本从 0 起（新会话新序号空间）
+	QList<int> healed;		//待删除集合（迭代中删键会使迭代器失效，收集后统一删除）
 
-	this->m_ledger.clear();		//★ 先清空再加载（防上一账号残留）
-	this->m_seenMsgId.clear();		//自回声集合同步清（防上个账号残留——尾号不同实际不会误命中，语义上清干净）
-	this->m_reorderBuf.clear();		//乱序缓冲区同步清（防上个账号残留——旧账号的超前消息残留会污染新账号账本：残留 seq 恰接上时被误排空渲染，且推高账本致真消息被判"落后"丢弃）
+	//遍历补拉任务表
+	for (auto it = this->m_gapPullTasks.begin(); it != this->m_gapPullTasks.end(); ++it) {
+		int convId = it.key();
 
-	//ini 与 config.ini 同放 exe 目录（双击 exe / IDE 启动的工作目录不同，相对路径会散落两处）
-	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini").arg(empID);
-	QSettings settings(path, QSettings::IniFormat);
-	for (const QString& key : settings.allKeys()) {
-		//键格式：Ledger/<convId>（历史残留的 Send/ 键直接忽略——取号机已退役）
-		QStringList parts = key.split('/');
-		if (parts.size() != 2 || parts.at(0) != QStringLiteral("Ledger")) {
+		//会话乱序缓冲区已空，移除补拉任务
+		if (this->m_reorderBuf.value(convId).isEmpty() == true) {
+			healed.append(convId);
 			continue;
 		}
-		this->m_ledger[parts.at(1).toInt()] = settings.value(key).toULongLong();
+
+		//补拉次数耗尽：跳洞（推进账本至乱序缓冲区 seq - 1）
+		if (it.value() <= 0) {
+			quint64 next = this->m_reorderBuf.value(convId).firstKey();
+			this->m_ledger[convId] = next - 1;
+
+			qWarning() << QStringLiteral("[GapPull] conv=%1 补拉次数耗尽，跳洞：账本推进到 %2（丢失 seq=%3 视为已收）").arg(convId).arg(next - 1).arg(next - 1);
+			
+			this->flushReorderBuf(convId);		//渲染缓冲区剩余消息
+			continue;
+		}
+
+		//仍有次数：发送拉取请求，单会话定点补拉，次数 -1
+		this->sendPullRequest(convId);
+		it.value()--;
 	}
-	qDebug() << QStringLiteral("[Seq] 账本载入完成：uid=%1，账本 %2 个会话")
-			.arg(empID).arg(this->m_ledger.size());
+
+	//迭代结束后统一删除补拉任务
+	for (int convId : healed) {
+		this->m_gapPullTasks.remove(convId);
+	}
 }
 
-void TcpClient::seedLedgerFromContacts(int empID) {
-	//账本补零：遍历通讯录快照，账本缺失的会话显式补游标 0
-	//（空账本 → buildCursorTable 报 "00" → 服务端按表办事返回空 → 敲门/拉取死循环；补零后清单含全部会话，从 0 起拉）
-	//注意：不覆盖已有条目——只补缺，已推进的游标原样保留
 
-	//路径用参数 empID 直接构造（不能复用 saveLedgerState：其路径取 WindowManager.m_empID，
-	//而该值在 emit 登录响应、UserLogin new CCMainWindow 之后才设置，此刻仍是旧值/初始值 -1）
-	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini").arg(empID);
-	QSettings settings(path, QSettings::IniFormat);
+// =======================================================================================================
 
+void TcpClient::mirrorServerLedger(int empID, const QHash<int, quint64>& serverLedger) {
+	//账本初始化（登录时一次性完成）：清残留 → 镜像服务端进度 → 补零
+	//DB tab_ledger 是唯一进度源
+	//换设备 / 同设备 / 崩溃重登统一语义：镜像"上次进度"→ Pull 拉"进度之后"的消息（离线未读可见、历史不重拉）
+
+	//1. 清残留（防上一账号数据污染——须在镜像前完成）
+	this->m_ledger.clear();			//先清空再镜像
+	this->m_reorderBuf.clear();		//乱序缓冲区同步清
+	this->m_gapPullTasks.clear();	//补拉任务表同步清
+
+	//2. 镜像：QHash → QMap 逐条搬运（服务端账本为空表 = 全新账号 → 空表，下一步补零兜底）
+	for (auto it = serverLedger.begin(); it != serverLedger.end(); ++it) {
+		this->m_ledger[it.key()] = it.value();
+	}
+
+	//3. 补零：按通讯录快照为缺失会话补游标 0（只补缺不覆盖，已推进的游标原样保留）
+	//（空账本死锁解：空表 → PullRequest/心跳报 "00" → 服务端按表办事/心跳 count≤0 直接只保活——消息永远拉不到）
 	for (int convId : ContactBook::getInstance().allConvIds()) {
 		if (this->m_ledger.contains(convId) == false) {
 			this->m_ledger[convId] = 0;
-			settings.setValue(QStringLiteral("Ledger/%1").arg(convId), QStringLiteral("0"));
 		}
 	}
-	settings.sync();		//立即落盘（防崩溃窗口，与 saveLedgerState 同策略）
-	qDebug() << QStringLiteral("[Seq] 账本补零完成：uid=%1，账本 %2 个会话")
-		.arg(empID).arg(this->m_ledger.size());
-}
 
-void TcpClient::saveLedgerState(int convId) {
-	//消息渲染落账时同步写入（防崩溃窗口：账本内存推进了没写盘就崩溃，重启读回旧游标 → 重复拉取，靠 msgId 去重兜底）
-	QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/seq_%1.ini")
-		.arg(WindowManager::getInstance().m_empID);
-	QSettings settings(path, QSettings::IniFormat);
-	settings.setValue(QStringLiteral("Ledger/%1").arg(convId),
-		QString::number(this->m_ledger.value(convId)));
-	settings.sync();		//立即落盘
+	qDebug() << QStringLiteral("[Seq] 账本初始化完成：uid=%1，账本 %2 个会话")
+			.arg(empID).arg(this->m_ledger.size());
 }
 
 void TcpClient::handlePulledMsg(int convId, quint64 seq, const QString& msgId, const QByteArray& payload) {
 	//连续性校验三分支：命中渲染落账 / 落后丢弃 / 超前缓冲补洞
 	//双防线去重：账本比较挡旧号重放（seq ≤ cur），msgId 判重挡自回声
 
+	// 通过账本获取当前会话 seq
 	quint64 cur = this->m_ledger.value(convId, 0);		//无记录 = 0（value 不插表，账本零污染）
 
 	if (seq == cur + 1) {
-		// 命中：msgId 判重 → 渲染 + 账本推进（账本无条件推进，渲染才判重——自回声消息的账本也要走）
+		// 命中：msgId 判重 → 渲染入库 + 账本推进
 		if (this->m_seenMsgId.contains(msgId) == false) {
 			this->dispatchMsg(payload);
 		}
 		this->m_ledger[convId] = seq;
 
-		// 回看乱序缓冲区：超前暂存的消息若恰好接上，连发排空（QMap 按 seq 有序，firstKey 即队首）
-		QMap<quint64, QPair<QString, QByteArray>>& buf = this->m_reorderBuf[convId];
-		while (buf.isEmpty() == false && buf.firstKey() == this->m_ledger.value(convId) + 1) {
-			const QString& bufMsgId = buf.first().first;		//缓冲区判重：自己的消息因空洞进缓冲，排空同样跳渲染
-			if (this->m_seenMsgId.contains(bufMsgId) == false) {
-				this->dispatchMsg(buf.first().second);
-			}
-			this->m_ledger[convId] = buf.firstKey();
-			buf.erase(buf.begin());
-		}
-		if (buf.isEmpty() == true) {
-			this->m_reorderBuf.remove(convId);		//排空清理空表项
-		}
-
-		this->saveLedgerState(convId);		//循环外一次落盘（含连发推进的最终值）
+		// 查看乱序缓冲区：超前暂存的消息若恰好接上，连发排空（洞填上即任务完成）
+		this->flushReorderBuf(convId);
 	}
 	else if (seq <= cur) {
-		// 落后（重复拉取）：丢弃——账本已是更高值，说明这条早收过
+		// 落后（重复拉取）：直接丢弃
 		qDebug() << QStringLiteral("[Pull] conv=%1 seq=%2 落后于账本(%3)，丢弃重复").arg(convId).arg(seq).arg(cur);
 	}
 	else {
-		// 超前（发现空洞 seq ∈ (cur+1, seq)）：暂存（msgId+载荷）+ 定点补拉
+		// 超前（发现空洞 seq > cur+1 ）：加入乱序缓冲区
 		this->m_reorderBuf[convId].insert(seq, qMakePair(msgId, payload));
 		qWarning() << QStringLiteral("[Pull] conv=%1 空洞：账本=%2 收到=%3，缓冲并补拉").arg(convId).arg(cur).arg(seq);
-		// TODO(B5)：sendGapPull(convId)——单会话定点补拉（游标=当前账本，500ms×5 次超时跳账）
+
+		// 添加定点补拉任务，启动补拉定时器：任务纯入表（已在表不重置——防补拉响应回流的超前消息刷新计数永不跳洞）
+		if (this->m_gapPullTasks.contains(convId) == false) {
+			this->m_gapPullTasks.insert(convId, 5);
+			if (this->m_gapPullTimer->isActive() == false) {
+				this->m_gapPullTimer->start();
+			}
+		}
 	}
+}
+
+void TcpClient::flushReorderBuf(int convId) {
+	//排空乱序缓冲区：从队首起连发恰好接上账本的超前消息（命中补洞 / 跳洞放行 共用出口）
+	//QMap 按 seq 有序，firstKey 即队首；账本逐条推进，排空至下一个洞为止
+
+	QMap<quint64, QPair<QString, QByteArray>>& buf = this->m_reorderBuf[convId];
+
+	//账本的 seq 恰好与 乱序缓冲区衔接上
+	while (buf.isEmpty() == false && buf.firstKey() == this->m_ledger.value(convId) + 1) {
+		const QString& bufMsgId = buf.first().first;		//缓冲区判重：自己的群消息因空洞进缓冲，排空同样跳渲染（账本照常推进）
+		if (this->m_seenMsgId.contains(bufMsgId) == false) {
+			this->dispatchMsg(buf.first().second);
+		}
+		this->m_ledger[convId] = buf.firstKey();
+		buf.erase(buf.begin());
+	}
+	if (buf.isEmpty() == true) {
+		this->m_reorderBuf.remove(convId);		//排空清理空表项
+		this->m_gapPullTasks.remove(convId);		//缓冲排空 = 洞已解决，补拉任务终结（表空由扫描槽下拍自停）
+	}
+	//（进度不再落盘：由 PullResponse 批次心跳上报 DB 持久化）
 }
 
 void TcpClient::dispatchMsg(const QByteArray& payload) {

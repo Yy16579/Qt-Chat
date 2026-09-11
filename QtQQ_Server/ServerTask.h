@@ -58,7 +58,9 @@ signals:
 	//登录验证完成：ok = 账密是否验证通过；snapshot = 通讯录快照 JSON（验证失败为空）
 	//maxSeqs = 该用户各会话 DB 权威高水位（convId → MAX(seq)，验证失败为空表）——
 	//          用于登录时重建 m_convMaxSeq（服务端重启丢内存高水位后，靠每个用户登录增量自愈）
-	void loginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs);
+	//ledger = 该用户账本镜像（tab_ledger 持久化的接收进度，convId → 游标，验证失败为空表）——
+	//          随登录响应下发，客户端镜像后拉取"上次进度之后"的消息（离线未读可见、历史不重拉）
+	void loginVerified(int descriptor, bool ok, int uid, const QByteArray& snapshot, const QHash<int, quint64>& maxSeqs, const QHash<int, quint64>& ledger);
 
 	//私聊消息入库完成：
 	//ok = INSERT 成败；convId = 会话键（私聊=发送者 uid）；seq = 会话内序号（服务端号池分配）
@@ -189,6 +191,22 @@ public:
 
 private:
 	TaskSignals* m_signals;		//结果回传器
+};
+
+
+//---------- LedgerUpsertTask：账本进度持久化任务 ----------
+// 客户端接收进度上报（心跳 / PullRequest / 渲染即时心跳三入口投递）→ tab_ledger upsert
+// GREATEST 取大：迟到心跳防回退（被踢设备的旧游标不拉低新设备进度）
+// 无结果回传：DB 写失败仅丢一次上报，下次心跳覆盖（尽力而为，无自愈必要）
+class LedgerUpsertTask : public QRunnable {
+public:
+	LedgerUpsertTask(int uid, const QHash<int, quint64>& ledger);
+
+	void run() override;
+
+private:
+	int m_uid;							//上报用户 uid
+	QHash<int, quint64> m_ledger;		//客户端账本快照（会话ID → 游标）
 };
 
 //==================================================================================================================================
