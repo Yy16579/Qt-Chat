@@ -703,9 +703,16 @@ void TcpClient::onGapPullTimeout() {
 	QList<int> healed;		//待删除集合（迭代中删键会使迭代器失效，收集后统一删除）
 	bool holeSkipped = false;		//本拍是否发生跳洞（跳洞推进的账本不走 PullResponse 出口，须主动上报）
 
-	//遍历补拉任务表
-	for (auto it = this->m_gapPullTasks.begin(); it != this->m_gapPullTasks.end(); ++it) {
-		int convId = it.key();
+	//keys() 快照迭代：跳洞分支经 flushReorderBuf 排空时会在迭代中途删键（任务表 remove），
+	//直接迭代 QHash 会使迭代器失效（本拍实测侥幸未崩 = 依赖实现细节，非契约保证）——改为遍历键快照，
+	//循环体首行 contains() 复检跳过已亡键（连环跳洞同拍删除后续键的场景）
+	QList<int> snapshot = this->m_gapPullTasks.keys();
+	for (int convId : snapshot) {
+
+		//键已被同拍先前的跳洞删除（多会话连环跳洞），跳过
+		if (this->m_gapPullTasks.contains(convId) == false) {
+			continue;
+		}
 
 		//会话乱序缓冲区已空，无补拉任务
 		if (this->m_reorderBuf.value(convId).isEmpty() == true) {
@@ -714,20 +721,20 @@ void TcpClient::onGapPullTimeout() {
 		}
 
 		//补拉次数耗尽：跳洞（推进账本至乱序缓冲区 seq - 1）
-		if (it.value() <= 0) {
+		if (this->m_gapPullTasks.value(convId) <= 0) {
 			quint64 next = this->m_reorderBuf.value(convId).firstKey();
 			this->m_ledger[convId] = next - 1;
 
 			qWarning() << QStringLiteral("[GapPull] conv=%1 补拉次数耗尽，跳洞：账本推进到 %2（丢失 seq=%3 视为已收）").arg(convId).arg(next - 1).arg(next - 1);
 
-			this->flushReorderBuf(convId);		//渲染缓冲区剩余消息（排空中账本随之推进至终值）
+			this->flushReorderBuf(convId);		//渲染缓冲区剩余消息（排空中账本随之推进至终值；缓冲排空时任务键在此被移除）
 			holeSkipped = true;
 			continue;
 		}
 
 		//仍有次数：发送拉取请求，单会话定点补拉，次数 -1
 		this->sendPullRequest(convId);
-		it.value()--;
+		this->m_gapPullTasks[convId]--;
 	}
 
 	//迭代结束后统一删除补拉任务
