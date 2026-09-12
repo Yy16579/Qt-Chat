@@ -515,7 +515,7 @@ void TcpClient::onProcessPacket(const QByteArray& packet) {
 	}
 	else if (packetType == static_cast<quint16>(PacketType::LoginResponse)) {
 		// ===== 2. 登录响应包 =====
-		// 格式：成功 "1" + uid(5B) + 账本镜像表(count2B + N×[convId5B+游标10B]) + 通讯录JSON；失败 "0"
+		// 格式：成功 "1" + uid(5B) + 账本(count2B + N×[convId5B+游标10B]) + 通讯录JSON；失败 "0"
 		if (dataBody.size() < 1) {
 			qDebug() << QStringLiteral("[LoginResponse] 数据体过短(%1字节)，丢弃").arg(dataBody.size());
 			return;
@@ -701,12 +701,13 @@ void TcpClient::onGapPullTimeout() {
 	}
 
 	QList<int> healed;		//待删除集合（迭代中删键会使迭代器失效，收集后统一删除）
+	bool holeSkipped = false;		//本拍是否发生跳洞（跳洞推进的账本不走 PullResponse 出口，须主动上报）
 
 	//遍历补拉任务表
 	for (auto it = this->m_gapPullTasks.begin(); it != this->m_gapPullTasks.end(); ++it) {
 		int convId = it.key();
 
-		//会话乱序缓冲区已空，移除补拉任务
+		//会话乱序缓冲区已空，无补拉任务
 		if (this->m_reorderBuf.value(convId).isEmpty() == true) {
 			healed.append(convId);
 			continue;
@@ -718,8 +719,9 @@ void TcpClient::onGapPullTimeout() {
 			this->m_ledger[convId] = next - 1;
 
 			qWarning() << QStringLiteral("[GapPull] conv=%1 补拉次数耗尽，跳洞：账本推进到 %2（丢失 seq=%3 视为已收）").arg(convId).arg(next - 1).arg(next - 1);
-			
-			this->flushReorderBuf(convId);		//渲染缓冲区剩余消息
+
+			this->flushReorderBuf(convId);		//渲染缓冲区剩余消息（排空中账本随之推进至终值）
+			holeSkipped = true;
 			continue;
 		}
 
@@ -732,6 +734,13 @@ void TcpClient::onGapPullTimeout() {
 	for (int convId : healed) {
 		this->m_gapPullTasks.remove(convId);
 	}
+
+	//跳洞补报：跳洞路径不经过 PullResponse 批次出口（无批次心跳可搭车），此处主动补一次
+	//同步的是 flushReorderBuf 排空后的账本终值（GREATEST 取大零副作用）——封死"游标落后
+	//窗口内断线重连 → 镜像回退 → 重演补拉"的冗余链路；残余毫秒级写丢失竞态由本地 msgId 幂等吸收
+	if (holeSkipped == true) {
+		this->sendHeartbeat();
+	}
 }
 
 
@@ -743,9 +752,9 @@ void TcpClient::mirrorServerLedger(int empID, const QHash<int, quint64>& serverL
 	//换设备 / 同设备 / 崩溃重登统一语义：镜像"上次进度"→ Pull 拉"进度之后"的消息（离线未读可见、历史不重拉）
 
 	//1. 清残留（防上一账号数据污染——须在镜像前完成）
-	this->m_ledger.clear();			//先清空再镜像
-	this->m_reorderBuf.clear();		//乱序缓冲区同步清
-	this->m_gapPullTasks.clear();	//补拉任务表同步清
+	this->m_ledger.clear();			//清空账本
+	this->m_reorderBuf.clear();		//清空乱序缓冲区
+	this->m_gapPullTasks.clear();	//清空补拉任务表
 
 	//2. 镜像：QHash → QMap 逐条搬运（服务端账本为空表 = 全新账号 → 空表，下一步补零兜底）
 	for (auto it = serverLedger.begin(); it != serverLedger.end(); ++it) {
@@ -772,9 +781,9 @@ void TcpClient::handlePulledMsg(int convId, quint64 seq, const QString& msgId, c
 	quint64 cur = this->m_ledger.value(convId, 0);		//无记录 = 0（value 不插表，账本零污染）
 
 	if (seq == cur + 1) {
-		// 命中：msgId 判重 → 渲染入库 + 账本推进
+		// 命中：msgId 判重 → 入库渲染 + 账本推进
 		if (this->m_seenMsgId.contains(msgId) == false) {
-			this->dispatchMsg(payload);
+			this->dispatchMsg(msgId, payload);
 		}
 		this->m_ledger[convId] = seq;
 
@@ -810,7 +819,7 @@ void TcpClient::flushReorderBuf(int convId) {
 	while (buf.isEmpty() == false && buf.firstKey() == this->m_ledger.value(convId) + 1) {
 		const QString& bufMsgId = buf.first().first;		//缓冲区判重：自己的群消息因空洞进缓冲，排空同样跳渲染（账本照常推进）
 		if (this->m_seenMsgId.contains(bufMsgId) == false) {
-			this->dispatchMsg(buf.first().second);
+			this->dispatchMsg(bufMsgId, buf.first().second);
 		}
 		this->m_ledger[convId] = buf.firstKey();
 		buf.erase(buf.begin());
@@ -822,8 +831,9 @@ void TcpClient::flushReorderBuf(int convId) {
 	//（进度不再落盘：由 PullResponse 批次心跳上报 DB 持久化）
 }
 
-void TcpClient::dispatchMsg(const QByteArray& payload) {
+void TcpClient::dispatchMsg(const QString& msgId, const QByteArray& payload) {
 	//载荷切分：[群标志1B][发送者5B][接收者(私5/群4)][类型1B][内容...]
+	//msgId 不在载荷内（拉取切包时已单独剥离），随信号下传供本地库幂等判重
 
 	if (payload.size() < 11) {		//群聊头最小 11B（私聊 12B 更长天然覆盖）
 		qWarning() << QStringLiteral("[Pull] 载荷过短(%1字节)，丢弃").arg(payload.size());
@@ -836,7 +846,7 @@ void TcpClient::dispatchMsg(const QByteArray& payload) {
 	int msgType = QString::fromUtf8(payload.mid(6 + recvLen, 1)).toInt();
 	QString msg = QString::fromUtf8(payload.mid(6 + recvLen + 1));
 
-	emit this->signalMessageReceived(groupFlag, sendId, recvId, msgType, msg);		//→ TalkSessionStore 入库+广播
+	emit this->signalMessageReceived(groupFlag, sendId, recvId, msgType, msg, msgId);		//→ TalkSessionStore 入库+广播
 }
 
 QByteArray TcpClient::buildCursorTable(int singleConvId) {

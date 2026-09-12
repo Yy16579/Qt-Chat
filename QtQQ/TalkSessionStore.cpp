@@ -40,6 +40,7 @@ void TalkSessionStore::open(int empID) {
 	query.exec("CREATE TABLE IF NOT EXISTS `tab_msg` ("
 		"`id`         INTEGER PRIMARY KEY AUTOINCREMENT,"
 		"`talk_id`    INTEGER NOT NULL,"			//会话ID（私聊=对方employeeID，群聊=群ID）
+		"`msg_id`     TEXT,"						//幂等键：网络消息全局唯一ID（与服务端 tab_msg.msg_id 同源）；自发消息 NULL（不参与判重）
 		"`send_id`    INTEGER NOT NULL,"
 		"`recv_id`    INTEGER NOT NULL,"
 		"`msg_type`   INTEGER NOT NULL,"
@@ -47,6 +48,24 @@ void TalkSessionStore::open(int empID) {
 		"`mine`       INTEGER NOT NULL,"			//1=我发的（右侧气泡）
 		"`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP"
 		")");
+
+	//老库迁移：旧版表无 msg_id 列 → 补列（SQLite 无 ADD COLUMN IF NOT EXISTS，须 PRAGMA 查列名判断）
+	//历史行补列后为 NULL，不参与判重（旧消息的进度已由服务端账本覆盖，不会重到）
+	query.exec("PRAGMA table_info(`tab_msg`)");
+	bool hasMsgId = false;
+	while (query.next()) {
+		if (query.value(1).toString() == QStringLiteral("msg_id")) {		//table_info 第 2 列 = 列名
+			hasMsgId = true;
+			break;
+		}
+	}
+	if (hasMsgId == false) {
+		query.exec("ALTER TABLE `tab_msg` ADD COLUMN `msg_id` TEXT");
+	}
+
+	//幂等索引：msg_id 唯一（多个 NULL 互不冲突，SQL 标准语义——自发消息天然共存）
+	//配合 INSERT OR IGNORE 吸收窄窗口重拉的同一条消息，根治重复入库/重复渲染
+	query.exec("CREATE UNIQUE INDEX IF NOT EXISTS `idx_msg_id` ON `tab_msg`(`msg_id`)");
 }
 
 QList<MsgRecord> TalkSessionStore::records(int uid) {
@@ -111,7 +130,7 @@ void TalkSessionStore::close() {
 
 
 //槽函数
-void TalkSessionStore::onTcpMessage(int groupFlag, int sendId, int recvId, int msgType, const QString& msg) {
+void TalkSessionStore::onTcpMessage(int groupFlag, int sendId, int recvId, int msgType, const QString& msg, const QString& msgId) {
 	//网络消息入口
 
 	// 1. 路由判定
@@ -136,18 +155,27 @@ void TalkSessionStore::onTcpMessage(int groupFlag, int sendId, int recvId, int m
 		uid = recvId;
 	}
 
-	// 2. 入库（wire 格式原样保存，网络收到的消息 mine=false，渲染左侧气泡）
-	//库未打开时跳过
+	// 2. 幂等入库（wire 格式原样保存，网络收到的消息 mine=false，渲染左侧气泡）
+	//INSERT OR IGNORE + msg_id 唯一索引 = 幂等闸门：游标回退窗口（跳洞漏报/心跳竞态/重登镜像回退）
+	//内重拉的同一条消息被索引吸收；numRowsAffected()=0 即重复 → 不广播，渲染随之幂等
+	//库未打开时无闸门，照常广播（降级模式本就不持久化，维持既有语义）
 	if (this->m_isOpen) {
 		QSqlQuery query(this->m_db);
-		query.prepare("INSERT INTO `tab_msg` (`talk_id`, `send_id`, `recv_id`, `msg_type`, `content`, `mine`) VALUES (?, ?, ?, ?, ?, ?)");
+		query.prepare("INSERT OR IGNORE INTO `tab_msg` (`talk_id`, `msg_id`, `send_id`, `recv_id`, `msg_type`, `content`, `mine`) VALUES (?, ?, ?, ?, ?, ?, ?)");
 		query.addBindValue(uid);
+		query.addBindValue(msgId);
 		query.addBindValue(sendId);
 		query.addBindValue(recvId);
 		query.addBindValue(msgType);
 		query.addBindValue(msg);
 		query.addBindValue(0);		//网络收到的消息 mine=false
 		query.exec();
+
+		//0 行受影响 = 唯一索引命中 = 该消息已入过库（窄窗口重拉），静默吸收：不广播不渲染
+		if (query.numRowsAffected() == 0) {
+			qDebug() << QStringLiteral("[LocalStore] msgId=%1 重复消息，幂等吸收（不广播不渲染）").arg(msgId);
+			return;
+		}
 	}
 
 	// 3. 广播

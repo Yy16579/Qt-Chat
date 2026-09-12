@@ -43,7 +43,7 @@ signals:
 
 private slots:
 	//槽函数
-	void onTcpMessage(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);	// TcpClient 网络消息的唯一入口（路由判定 + 入库 + 广播）
+	void onTcpMessage(int groupFlag, int sendId, int recvId, int msgType, const QString& msg, const QString& msgId);	// TcpClient 网络消息的唯一入口（路由判定 + 幂等入库 + 广播；msgId 为本地库判重键）
 
 private:
 	//成员变量

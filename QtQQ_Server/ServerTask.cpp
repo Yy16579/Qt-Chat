@@ -156,7 +156,7 @@ void LoginTask::run() {
 		//验证成功 → 打包通讯录快照（随登录响应一并下发）
 		QByteArray snapshot = this->buildContactSnapshot();
 
-		//验证成功 → 服务端同步该用户账本（convId → MAX(seq)，DB 权威值）（重启自愈）
+		//验证成功 → 服务端初始化总账本（convId → MAX(seq)，DB 权威值）（重启自愈）
 		QHash<int, quint64> maxSeqs;
 		query.prepare("SELECT `conv_id`, MAX(`seq`) FROM `tab_msg` WHERE `recv_id` = ? GROUP BY `conv_id`");
 		query.addBindValue(empID.toInt());

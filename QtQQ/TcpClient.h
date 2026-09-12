@@ -70,7 +70,7 @@ private:
 	QByteArray buildCursorTable(int singleConvId = -1);		//创建账本快照 [会话数2B] + N × [convId5B][游标10B]
 	void handlePulledMsg(int convId, quint64 seq, const QString& msgId, const QByteArray& payload);		//拉取消息连续性校验
 	void flushReorderBuf(int convId);	//排空乱序缓冲区：连发接上账本的超前消息（命中/跳洞共用出口，排空即任务完成）
-	void dispatchMsg(const QByteArray& payload);		//载荷切分 + 发射接收信号（拉取/缓冲排空共用出口）
+	void dispatchMsg(const QString& msgId, const QByteArray& payload);		//载荷切分 + 发射接收信号（拉取/缓冲排空共用出口；msgId 随信号下传供本地库幂等判重）
 	void flushPending();				//断线重连重登成功后，未确认消息全表重发（attempts 归零）
 	void clearPending();				//会话终结（Logout/KickOut）清空全表
 	// =================================================================================================================
@@ -98,7 +98,7 @@ signals:
 
 
 	// 业务分发信号 ====================================================================================================
-	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg);
+	void signalMessageReceived(int groupFlag, int sendId, int recvId, int msgType, const QString& msg, const QString& msgId);		//msgId = 消息全局唯一ID（本地库幂等判重键）
 	void signalLoginResponse(bool result, int empID);
 	void signalKickedOut();
 	// =================================================================================================================
