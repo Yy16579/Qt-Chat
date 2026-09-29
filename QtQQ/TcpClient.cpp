@@ -133,6 +133,7 @@ void TcpClient::connectToServer() {
 
 				this->m_buffer.clear();			//清空缓冲区
 				this->m_heartbeatTimer->stop();	//停止心跳定时器
+
 				this->m_reorderBuf.clear();		//清空乱序缓冲区（连接级状态随 TCP 会话死亡作废，主动/意外断线一律清）
 				this->m_gapPullTasks.clear();	//清空补拉任务表
 				this->m_gapPullTimer->stop();	//停止定点补拉定时器
@@ -835,7 +836,6 @@ void TcpClient::flushReorderBuf(int convId) {
 		this->m_reorderBuf.remove(convId);		//排空清理空表项
 		this->m_gapPullTasks.remove(convId);		//缓冲排空 = 洞已解决，补拉任务终结（表空由扫描槽下拍自停）
 	}
-	//（进度不再落盘：由 PullResponse 批次心跳上报 DB 持久化）
 }
 
 void TcpClient::dispatchMsg(const QString& msgId, const QByteArray& payload) {

@@ -7,18 +7,6 @@
 ;   3. 运行时由 CommonUtils::getConfigPath() 定位并读取
 ; ============================================================
 
-[Database]
-; MySQL 数据库主机地址
-host=localhost
-; MySQL 数据库端口
-port=3306
-; 数据库登录用户名
-userName=root
-; 数据库登录密码（请修改为实际密码）
-password=your_password_here
-; 数据库名称
-databaseName=qtqq
-
 [Tcp]
 ; 服务端 TCP 监听地址
 host=127.0.0.1

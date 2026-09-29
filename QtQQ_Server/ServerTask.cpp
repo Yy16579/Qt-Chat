@@ -417,7 +417,7 @@ SeqPoolInitTask::SeqPoolInitTask(TaskSignals* taskSignals)
 {}
 
 void SeqPoolInitTask::run() {
-	//号池断点重建：DB 是权威记忆
+	//号池初始化：DB 是权威记忆
 	//私聊键 = (recvId<<32)|convId 逐行直填；群键 = 群号（同一群 N 个成员的行各查各的 MAX，池线程内取大折叠成单值）
 	//主线程 onSeqPoolLoaded 再做一层"DB 值 vs 运行期号池"取大合并（防启动早期已取的高值被 DB 旧值覆盖）
 

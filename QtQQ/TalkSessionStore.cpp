@@ -49,20 +49,6 @@ void TalkSessionStore::open(int empID) {
 		"`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP"
 		")");
 
-	//老库迁移：旧版表无 msg_id 列 → 补列（SQLite 无 ADD COLUMN IF NOT EXISTS，须 PRAGMA 查列名判断）
-	//历史行补列后为 NULL，不参与判重（旧消息的进度已由服务端账本覆盖，不会重到）
-	query.exec("PRAGMA table_info(`tab_msg`)");
-	bool hasMsgId = false;
-	while (query.next()) {
-		if (query.value(1).toString() == QStringLiteral("msg_id")) {		//table_info 第 2 列 = 列名
-			hasMsgId = true;
-			break;
-		}
-	}
-	if (hasMsgId == false) {
-		query.exec("ALTER TABLE `tab_msg` ADD COLUMN `msg_id` TEXT");
-	}
-
 	//幂等索引：msg_id 唯一（多个 NULL 互不冲突，SQL 标准语义——自发消息天然共存）
 	//配合 INSERT OR IGNORE 吸收窄窗口重拉的同一条消息，根治重复入库/重复渲染
 	query.exec("CREATE UNIQUE INDEX IF NOT EXISTS `idx_msg_id` ON `tab_msg`(`msg_id`)");
